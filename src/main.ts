@@ -13,13 +13,15 @@ if (canvas) {
     connectorDiv.style.display = 'none';
   });
   canvas.width = window.innerWidth;
-  canvas.height = window.innerHeight * 0.9;
+  canvas.height = window.innerHeight;
 
   const game = new Game(canvas);
 
   const socket = io('http://localhost:3000');
 
   connectBtn.addEventListener('click', () => {
+    game.reset(); // Clear everything for a fresh start
+    game.startMusic();
     const user = usernameInput.value.trim();
     if (user) {
       statusText.innerText = 'Connecting...';

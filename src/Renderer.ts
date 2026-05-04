@@ -49,7 +49,7 @@ export class Renderer {
         // ── 1. DRAW AVATAR (Circle Part) ──
         const circleBody = player.body.parts[1];
         const { x: cx, y: cy } = circleBody.position;
-        const circleAngle = player.body.angle; // Use main body angle for both
+        const circleAngle = player.body.angle;
 
         ctx.save();
         ctx.translate(cx, cy);
@@ -80,27 +80,43 @@ export class Renderer {
         ctx.stroke();
         ctx.restore();
 
-        // ── 3. DRAW KNIFE (Rectangle Part) ──
-        const knifeBody = player.body.parts[2];
-        const { x: kx, y: ky } = knifeBody.position;
-        const knifeAngle = player.body.angle;
+        // ── 3. DRAW KNIVES ──
+        const knifeParts = player.body.parts.filter(p => p.label === 'player-knife');
+        
+        knifeParts.forEach((kPart, i) => {
+            const { x: kx, y: ky } = kPart.position;
+            const knifeAngle = player.body.angle;
 
+            ctx.save();
+            ctx.translate(kx, ky);
+            const rotationOffset = (i === 0) ? Math.PI : 0;
+            ctx.rotate(knifeAngle + rotationOffset);
+
+            if (player.knifeImg) {
+                const img = player.knifeImg;
+                const targetH = 65;
+                const targetW = (img.width / img.height) * targetH;
+                ctx.drawImage(img, -targetW / 2, -targetH / 2, targetW, targetH);
+            } else {
+                const kh = 55;
+                ctx.fillStyle = "#aaaaaa";
+                ctx.fillRect(-3, -kh / 2, 6, kh * 0.7);
+                ctx.fillStyle = "#8B4513";
+                ctx.fillRect(-5, kh * 0.2, 10, kh * 0.3);
+            }
+            ctx.restore();
+        });
+
+        // ── 4. DRAW HP LABEL (Always Upright in the center) ──
         ctx.save();
-        ctx.translate(kx, ky);
-        ctx.rotate(knifeAngle);
-
-        const kw = 18;
-        const kh = 55;
-        if (player.knifeImg) {
-            // Draw centered on the knife body part
-            ctx.drawImage(player.knifeImg, -kw / 2, -kh / 2, kw, kh);
-        } else {
-            ctx.fillStyle = "#aaaaaa";
-            ctx.fillRect(-3, -kh / 2, 6, kh * 0.7);
-            ctx.fillStyle = "#8B4513";
-            ctx.fillRect(-5, kh * 0.2, 10, kh * 0.3);
-        }
-
+        ctx.translate(cx, cy);
+        ctx.font = "bold 32px Arial"; 
+        ctx.fillStyle = player.isHit ? "#FF0000" : "white";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle"; // Center vertically
+        ctx.shadowColor = "black";
+        ctx.shadowBlur = 8;
+        ctx.fillText(Math.ceil(player.hp).toString(), 0, 0);
         ctx.restore();
     }
 

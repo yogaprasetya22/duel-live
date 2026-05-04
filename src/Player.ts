@@ -4,11 +4,11 @@ import { GAME_CONFIG } from './Config';
 const { Bodies, World, Body } = Matter;
 
 const CIRCLE_OPTIONS = {
-  restitution: 1.0,
+  restitution: 1.1, // High bounciness as requested
   friction: 0.1,
-  frictionAir: 0.005,
+  frictionAir: 0.03, // Keep this for smooth horizontal movement
   frictionStatic: 0.1,
-  density: 0.004,
+  density: 0.005,
   label: 'player',
 };
 
@@ -30,6 +30,8 @@ export class Player {
   behaviorTimer: number = 0;
   trail: { x: number, y: number }[] = [];
   maxTrailLength: number = GAME_CONFIG.MAX_TRAIL_LENGTH;
+  swordCount: number = 1;
+  category: number;
 
   constructor(
     world: Matter.World,
@@ -49,38 +51,64 @@ export class Player {
     this.knifeOffsetDistance = radius + 28;
     this.knifeLocalAngle = Math.PI / 2;
 
-    const playerIndex = Math.floor(Math.random() * 10); // Random bit for collision if not sequential
-    const category = 0x1 << (playerIndex + 1);
+    const playerIndex = Math.floor(Math.random() * 10);
+    this.category = 0x1 << (playerIndex + 1);
 
-    const circlePart = Bodies.circle(x, y, radius, {
+    this.body = this.createBody(x, y);
+    World.add(world, this.body);
+  }
+
+  createBody(x: number, y: number) {
+    const circlePart = Bodies.circle(x, y, this.radius, {
       ...CIRCLE_OPTIONS,
       label: 'player-body'
     });
-    (circlePart as any).playerId = playerId;
+    (circlePart as any).playerId = this.id;
 
     const knifeWidth = 12;
     const knifeHeight = 55;
-    const knifePart = Bodies.rectangle(
-      x, 
-      y + radius + knifeHeight / 2, 
-      knifeWidth, 
-      knifeHeight, 
-      {
+    const parts = [circlePart];
+
+    for (let i = 0; i < this.swordCount; i++) {
+      // Calculate angle for each sword (evenly spaced)
+      // Start from bottom (Math.PI / 2)
+      const angle = (Math.PI / 2) + (i * (Math.PI * 2 / this.swordCount));
+      const dist = this.radius + knifeHeight / 2;
+      
+      const kx = x + Math.cos(angle) * dist;
+      const ky = y + Math.sin(angle) * dist;
+      
+      const knifePart = Bodies.rectangle(kx, ky, knifeWidth, knifeHeight, {
         ...CIRCLE_OPTIONS,
-        label: 'player-knife'
-      }
-    );
-    (knifePart as any).playerId = playerId;
+        label: 'player-knife',
+        angle: angle - Math.PI / 2 // Rotate to face outward
+      });
+      (knifePart as any).playerId = this.id;
+      parts.push(knifePart);
+    }
 
-    this.body = Body.create({
-      parts: [circlePart, knifePart],
-      collisionFilter: {
-        category: category,
-        mask: 0xFFFFFFFF ^ category,
-      }
+    return Body.create({
+      parts: parts,
+      frictionAir: 0.005,
+      restitution: 0.5,
     });
+  }
 
-    World.add(world, this.body);
+  addSword() {
+    this.swordCount++;
+    
+    // Recreate body with same state
+    const oldPos = { ...this.body.position };
+    const oldVel = { ...this.body.velocity };
+    const oldAngle = this.body.angle;
+    const oldAngVel = this.body.angularVelocity;
+
+    World.remove(this.world, this.body);
+    this.body = this.createBody(oldPos.x, oldPos.y);
+    Body.setVelocity(this.body, oldVel);
+    Body.setAngle(this.body, oldAngle);
+    Body.setAngularVelocity(this.body, oldAngVel);
+    World.add(this.world, this.body);
   }
 
   getKnifeWorldTransform() {
