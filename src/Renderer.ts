@@ -86,10 +86,14 @@ export class Renderer {
         knifeParts.forEach((kPart, i) => {
             const { x: kx, y: ky } = kPart.position;
             const knifeAngle = player.body.angle;
+            
+            // Calculate the same polar angle used in Player.ts
+            const polarAngle = (Math.PI / 2) + (i * (Math.PI * 2 / player.swordCount));
+            // Offset for drawing: we want the UP vector to point outward.
+            const rotationOffset = polarAngle + Math.PI / 2;
 
             ctx.save();
             ctx.translate(kx, ky);
-            const rotationOffset = (i === 0) ? Math.PI : 0;
             ctx.rotate(knifeAngle + rotationOffset);
 
             if (player.knifeImg) {

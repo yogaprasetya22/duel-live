@@ -1,7 +1,7 @@
 export const GAME_CONFIG = {
   // ── CORE GAMEPLAY ──
-  MAX_PLAYERS: 50,
-  RESPAWN_COOLDOWN: 10000, // ms
+  MAX_PLAYERS: 9999,
+  RESPAWN_COOLDOWN: 0, 
   VICTORY_TIMER: 20000,    // 20 detik countdown kemenangan
   PLAYER_RADIUS: 35,
   

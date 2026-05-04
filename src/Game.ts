@@ -151,30 +151,23 @@ export class Game {
     return { avatarImgs, knifeImg, swordSfx };
   }
 
+  // ── TIKTOK HANDLERS ──
   onTikTokChat(data: any) {
     const userId = data.uniqueId;
-    const existingPlayer = this.tiktokUsers.get(userId);
+    const player = this.tiktokUsers.get(userId);
 
-    if (existingPlayer) {
-      if (!existingPlayer.isDead) {
-        const force = GAME_CONFIG.CHAT_BOOST_FORCE;
-        const angle = Math.random() * Math.PI * 2;
-        Body.applyForce(existingPlayer.body, existingPlayer.body.position, {
-          x: Math.cos(angle) * force,
-          y: Math.sin(angle) * force
-        });
-      }
+    // Only allow spawning if player is NOT in game or is DEAD
+    if (player && !player.isDead) {
+      // If already alive, just boost movement
+      const force = GAME_CONFIG.CHAT_BOOST_FORCE;
+      const angle = Math.random() * Math.PI * 2;
+      Body.applyForce(player.body, player.body.position, {
+        x: Math.cos(angle) * force,
+        y: Math.sin(angle) * force
+      });
     } else {
-      const cooldown = this.respawnCooldowns.get(userId);
-      if (cooldown && Date.now() < cooldown) return;
-
-      if (this.players.length < this.MAX_PLAYERS) {
-        this.spawnNewPlayer(data.profilePictureUrl, userId);
-      } else {
-        if (!this.queue.some(q => q.name === userId)) {
-          this.queue.push({ avatarUrl: data.profilePictureUrl, name: userId });
-        }
-      }
+      // Spawn new player (Instant respawn if dead)
+      this.spawnNewPlayer(data.profilePictureUrl, userId);
     }
   }
 
@@ -182,16 +175,20 @@ export class Game {
     const userId = data.uniqueId;
     let player = this.tiktokUsers.get(userId);
 
+    // Respawn if dead or not exists
     if (!player || player.isDead) {
-      if (this.players.length < this.MAX_PLAYERS) {
-        this.spawnNewPlayer(data.profilePictureUrl, userId);
-        player = this.tiktokUsers.get(userId);
-      } else {
-        this.queue.push({ avatarUrl: data.profilePictureUrl, name: userId });
-      }
+      this.spawnNewPlayer(data.profilePictureUrl, userId);
+      // Wait a bit for spawn to finish or just use the new ref if we can
+      // For now, we'll try to find it again after a tick or just let the next gift trigger it
+      player = this.tiktokUsers.get(userId);
     }
 
     if (player && !player.isDead) {
+      // Gift 1 coin = +10 HP
+      const diamonds = data.diamondCount || 1;
+      player.hp += diamonds * 10;
+      
+      // Also add a sword for any gift
       player.addSword();
     }
   }
@@ -268,14 +265,15 @@ export class Game {
         if (aIsKnife && bIsBody && pB) {
           pB.takeDamage();
           this.playHitSfx();
-          this.createHitEffect(pair.collision.supports[0].x, pair.collision.supports[0].y, '#FF1744');
+          this.createHitEffect(pair.collision.supports[0]?.x || parentB.position.x, pair.collision.supports[0]?.y || parentB.position.y, '#FF1744');
         } else if (bIsKnife && aIsBody && pA) {
           pA.takeDamage();
           this.playHitSfx();
-          this.createHitEffect(pair.collision.supports[0].x, pair.collision.supports[0].y, '#FF1744');
+          this.createHitEffect(pair.collision.supports[0]?.x || parentA.position.x, pair.collision.supports[0]?.y || parentA.position.y, '#FF1744');
         }
 
-        this.applyKnockback(pair, parentA, parentB);
+        // Removed applyKnockback. Matter.js natively handles bounces perfectly with restitution=1.1.
+        // Adding artificial force caused chaotic/brutal movements when crowded.
       }
     });
   }
@@ -479,7 +477,9 @@ export class Game {
 
   createHitEffect(x: number, y: number, color: string) {
     this.shakeAmount = GAME_CONFIG.SHAKE_INTENSITY;
-    for (let i = 0; i < 15; i++) {
+    // FPS Optimization: Cap particles and reduce count per hit
+    if (this.particles.length > 50) return; 
+    for (let i = 0; i < 5; i++) { // Reduced from 15 to 5
       this.particles.push(new Particle(x, y, color));
     }
   }

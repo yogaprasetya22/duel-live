@@ -6,7 +6,7 @@ const { Bodies, World, Body } = Matter;
 const CIRCLE_OPTIONS = {
   restitution: 1.1, // High bounciness as requested
   friction: 0.1,
-  frictionAir: 0.03, // Keep this for smooth horizontal movement
+  frictionAir: 0.05, // Increased to 0.05 to heavily dampen brutal horizontal movement
   frictionStatic: 0.1,
   density: 0.005,
   label: 'player',
