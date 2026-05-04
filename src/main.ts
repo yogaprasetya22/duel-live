@@ -6,8 +6,12 @@ const connectBtn = document.getElementById('connect-btn') as HTMLButtonElement;
 const usernameInput = document.getElementById('username') as HTMLInputElement;
 const statusText = document.getElementById('status') as HTMLSpanElement;
 const connectorDiv = document.getElementById('connector') as HTMLDivElement;
+const closeBtn = document.getElementById('close-btn') as HTMLButtonElement;
 
 if (canvas) {
+  closeBtn?.addEventListener('click', () => {
+    connectorDiv.style.display = 'none';
+  });
   canvas.width = window.innerWidth;
   canvas.height = window.innerHeight * 0.9;
 

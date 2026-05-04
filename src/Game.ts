@@ -70,11 +70,39 @@ export class Game {
         const img = new Image();
         img.src = src;
         img.onload = () => resolve(img);
+        img.onerror = () => {
+          console.warn(`Failed to load asset: ${src}`);
+          resolve(img);
+        };
       });
     };
 
     const knifeImg = await loadImage('/knife.png');
-    this.knifeImg = knifeImg;
+    
+    // ── REMOVE BACKGROUND FROM KNIFE ──
+    const offCanvas = document.createElement('canvas');
+    offCanvas.width = knifeImg.width;
+    offCanvas.height = knifeImg.height;
+    const offCtx = offCanvas.getContext('2d');
+    if (offCtx) {
+      offCtx.drawImage(knifeImg, 0, 0);
+      const imgData = offCtx.getImageData(0, 0, offCanvas.width, offCanvas.height);
+      const data = imgData.data;
+      for (let i = 0; i < data.length; i += 4) {
+        // If pixel is white (or very close to it), make it transparent
+        if (data[i] > 240 && data[i+1] > 240 && data[i+2] > 240) {
+          data[i+3] = 0;
+        }
+      }
+      offCtx.putImageData(imgData, 0, 0);
+      // Replace the image source with the transparent canvas
+      const transparentKnife = new Image();
+      transparentKnife.src = offCanvas.toDataURL();
+      this.knifeImg = transparentKnife;
+    } else {
+      this.knifeImg = knifeImg;
+    }
+
     const avatarImgs = await Promise.all([
       loadImage('/p1.png'),
       loadImage('/p2.png'),
