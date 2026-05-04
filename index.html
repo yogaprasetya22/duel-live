@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>2D Battle Game</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { 
+        background: #000; 
+        display: flex; 
+        justify-content: center; 
+        align-items: center; 
+        height: 100vh; 
+        overflow: hidden;
+        font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      }
+      canvas { 
+        display: block; 
+        max-width: 100%;
+        max-height: 100%;
+        box-shadow: 0 0 50px rgba(0, 255, 65, 0.1);
+      }
+      #connector {
+        position: absolute;
+        z-index: 10;
+        background: rgba(20, 20, 20, 0.9);
+        padding: 2rem;
+        border: 1px solid #333;
+        border-radius: 12px;
+        backdrop-filter: blur(10px);
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+      }
+      input {
+        padding: 0.8rem;
+        background: #111;
+        border: 1px solid #444;
+        color: white;
+        border-radius: 6px;
+      }
+      button {
+        padding: 0.8rem;
+        background: #00ff41;
+        border: none;
+        color: black;
+        font-weight: bold;
+        cursor: pointer;
+        border-radius: 6px;
+      }
+      #status { color: #888; font-size: 0.8rem; text-align: center; }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div id="connector">
+        <input type="text" id="username" placeholder="TikTok Username (@...)" />
+        <button id="connect-btn">Connect Live</button>
+        <span id="status">Disconnected</span>
+      </div>
+      <canvas id="game"></canvas>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
