@@ -1,6 +1,6 @@
 export const GAME_CONFIG = {
   // ── CORE GAMEPLAY ──
-  MAX_PLAYERS: 9999,
+  MAX_PLAYERS: 20,
   RESPAWN_COOLDOWN: 0, 
   VICTORY_TIMER: 20000,    // 20 detik countdown kemenangan
   PLAYER_RADIUS: 35,
@@ -17,14 +17,14 @@ export const GAME_CONFIG = {
   AI_DECISION_INTERVAL: 500, // Reduced AI frequency to save CPU
   
   // ── AI & MOVEMENT ──
-  AI_IMPULSE_FORCE_MIN: 0.03, 
-  AI_IMPULSE_FORCE_VAR: 0.02, 
-  AI_BEHAVIOR_INTERVAL: 3000, // Much slower decision making (smooth)
+  AI_IMPULSE_FORCE_MIN: 0.015, 
+  AI_IMPULSE_FORCE_VAR: 0.01, 
+  AI_BEHAVIOR_INTERVAL: 4000, // Slower decision making
   CHAT_BOOST_FORCE: 0.05,     
   LIKE_BOOST_MULTIPLIER: 1.2,
   
-  MIN_SPEED: 3,
-  MAX_SPEED: 12,             
+  MIN_SPEED: 2,
+  MAX_SPEED: 8,             
   MAX_ANGULAR_VELOCITY: 0.1, 
   
   // ── VISUALS ──

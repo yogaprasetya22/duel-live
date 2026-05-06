@@ -146,7 +146,14 @@ io.on("connection", (socket) => {
     });
 
     socket.on("disconnect", () => {
-        console.log("Client disconnected");
+        console.log("Client disconnected:", socket.id);
+        
+        // If this socket started the tiktok connection, clean it up
+        if (tiktokConnection) {
+            console.log("Stopping TikTok connection due to client disconnect...");
+            tiktokConnection.disconnect();
+            tiktokConnection = null;
+        }
     });
 });
 

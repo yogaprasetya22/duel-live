@@ -1,26 +1,63 @@
-import * as PIXI from 'pixi.js';
-import type { Game } from './Game';
-import { Player } from './Player';
-import { query } from 'bitecs';
-import { world, Position, ParticleState, PARTICLE_COLORS } from './ECS';
+import * as PIXI from "pixi.js";
+import type { Game } from "./Game";
+import { Player } from "./Player";
+import { query } from "bitecs";
+import { world, Position, ParticleState, PARTICLE_COLORS } from "./ECS";
+
+// ─── Cached references per player view ───────────────────────────────────────
+// Storing direct object references eliminates ALL getChildByLabel() calls in the
+// hot render path. getChildByLabel is O(n) on the children array every call.
+interface PlayerViewCache {
+    view: PIXI.Container;
+    bodyGroup: PIXI.Container;
+    hudGroup: PIXI.Container;
+    glow: PIXI.Sprite;
+    avatarContainer: PIXI.Container;
+    avatarSprite: PIXI.Sprite | null;
+    mask: PIXI.Graphics;
+    hpText: PIXI.BitmapText;
+    nameText: PIXI.BitmapText;
+    swordContainer: PIXI.Container;
+    swordSprites: PIXI.Sprite[];
+    // Track last rendered values to skip unnecessary GPU uploads
+    lastHp: number;
+    lastRadius: number;
+    lastSwordCount: number;
+    lastMaskRadius: number;
+}
+
+// Pre-parsed color LUT: avoids parseInt + string replace every particle frame
+const PARTICLE_COLOR_LUT: number[] = PARTICLE_COLORS.map((c) =>
+    parseInt(c.replace("#", ""), 16),
+);
 
 export class Renderer {
     public app: PIXI.Application;
     public ready: Promise<void>;
-    private playerViews: Map<string, PIXI.Container> = new Map();
+
+    // ── View cache: direct refs instead of Map<id, Container> + getChildByLabel
+    private viewCache: Map<string, PlayerViewCache> = new Map();
+
     private arenaGraphic: PIXI.Graphics;
     private hudGraphic: PIXI.Graphics;
-    private fpsText: PIXI.Text | null = null;
+    private fpsText: PIXI.BitmapText | null = null;
     private bgVideoSprite: PIXI.Sprite | null = null;
-    
-    // Extreme Performance: Particle System
+
+    // Particle system
     private particleContainer: PIXI.Container;
     private particlePool: PIXI.Sprite[] = [];
     private particleTexture: PIXI.Texture | null = null;
-    
-    // Texture Caching for massive GPU speedup
+
+    // Texture cache
     private glowTexture: PIXI.Texture | null = null;
-    
+
+    // Arena dirty flag: only redraw when dimensions change
+    private lastArenaKey: string = "";
+
+    // Sort throttle: sort y-order every N frames (not every frame)
+    private sortFrameCounter: number = 0;
+    private readonly SORT_INTERVAL = 3; // sort every 3 frames
+
     private layers: {
         bg: PIXI.Container;
         grid: PIXI.Container;
@@ -38,13 +75,13 @@ export class Renderer {
             players: new PIXI.Container(),
             ui: new PIXI.Container(),
         };
-        
+
         this.particleContainer = new PIXI.Container();
         this.arenaGraphic = new PIXI.Graphics();
         this.hudGraphic = new PIXI.Graphics();
-        
+
         this.ready = this.init(canvas);
-        window.addEventListener('resize', () => this.onResize());
+        window.addEventListener("resize", () => this.onResize());
     }
 
     private onResize() {
@@ -81,13 +118,57 @@ export class Renderer {
         this.particleTexture = this.app.renderer.generateTexture(pg);
         pg.destroy();
 
-        const gg = new PIXI.Graphics().circle(0, 0, 50).stroke({ color: 0xffffff, width: 8 });
+        const gg = new PIXI.Graphics()
+            .circle(0, 0, 50)
+            .stroke({ color: 0xffffff, width: 2 });
         this.glowTexture = this.app.renderer.generateTexture(gg);
         gg.destroy();
 
-        this.fpsText = new PIXI.Text({
+        // ── Install BitmapFont once for the entire session ──────────────────
+        // BitmapText renders from a pre-built texture atlas: updating 1000 labels
+        // is ~10x faster than PIXI.Text because no per-update canvas draw happens.
+        PIXI.BitmapFont.install({
+            name: "OrbitronHUD",
+            style: {
+                fontFamily: "Orbitron",
+                fontSize: 32, // high base size; we'll scale down with BitmapText.scale
+                fill: 0xffffff,
+                fontWeight: "900",
+                stroke: { color: 0x000000, width: 6 },
+            },
+            chars: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.:/ ",
+            resolution: 1,
+        });
+
+        PIXI.BitmapFont.install({
+            name: "OrbitronName",
+            style: {
+                fontFamily: "Orbitron",
+                fontSize: 32,
+                fill: 0x00e5ff,
+                fontWeight: "900",
+                stroke: { color: 0x000000, width: 6 },
+            },
+            chars: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.:/ _-",
+            resolution: 1,
+        });
+
+        PIXI.BitmapFont.install({
+            name: "OrbitronFPS",
+            style: {
+                fontFamily: "Orbitron",
+                fontSize: 32,
+                fill: 0x00ff41,
+                fontWeight: "900",
+                stroke: { color: 0x000000, width: 6 },
+            },
+            chars: "FPS:0123456789 ",
+            resolution: 1,
+        });
+
+        this.fpsText = new PIXI.BitmapText({
             text: "FPS: 60",
-            style: { fontFamily: 'Orbitron', fontSize: 16, fill: 0x00ff41, fontWeight: '900', stroke: { color: 0x000000, width: 4 } }
+            style: { fontFamily: "OrbitronFPS", fontSize: 16 },
         });
         this.fpsText.position.set(20, 20);
         this.layers.ui.addChild(this.fpsText);
@@ -97,7 +178,10 @@ export class Renderer {
 
     private async setupVideoBackground() {
         try {
-            const texture = await PIXI.Assets.load({ src: '/bg.mp4', loadParser: 'loadVideo' });
+            const texture = await PIXI.Assets.load({
+                src: "/bg.mp4",
+                loadParser: "loadVideo",
+            });
             this.bgVideoSprite = new PIXI.Sprite(texture);
             this.bgVideoSprite.width = this.app.screen.width;
             this.bgVideoSprite.height = this.app.screen.height;
@@ -106,12 +190,15 @@ export class Renderer {
             source.muted = true;
             source.play();
             this.layers.bg.addChild(this.bgVideoSprite);
-        } catch (e) { console.error(e); }
+        } catch (e) {
+            console.error(e);
+        }
     }
 
     public render(game: Game) {
         if (!this.app.renderer) return;
 
+        // Arena: only redraw when arena dimensions actually changed
         this.drawArena(game.arenaX, game.arenaY, game.arenaW, game.arenaH);
 
         const playerCount = game.players.length;
@@ -124,157 +211,207 @@ export class Renderer {
             this.updatePlayerView(player);
         }
 
+        // Remove dead/gone players
         const toDelete: string[] = [];
-        this.playerViews.forEach((_, id) => { if (!activeIds.has(id)) toDelete.push(id); });
+        this.viewCache.forEach((_, id) => {
+            if (!activeIds.has(id)) toDelete.push(id);
+        });
         for (const id of toDelete) {
-            const view = this.playerViews.get(id);
-            if (view) {
-                this.layers.players.removeChild(view);
-                view.destroy({ children: true });
-                this.playerViews.delete(id);
+            const cache = this.viewCache.get(id);
+            if (cache) {
+                this.layers.players.removeChild(cache.view);
+                cache.view.destroy({ children: true });
+                this.viewCache.delete(id);
             }
         }
 
-        this.layers.players.children.sort((a, b) => a.y - b.y);
+        // Y-sort throttled: sorting 1000 items every frame is O(n log n) wasted work.
+        // Players move smoothly so sorting every 3 frames is imperceptible.
+        this.sortFrameCounter++;
+        if (this.sortFrameCounter >= this.SORT_INTERVAL) {
+            this.sortFrameCounter = 0;
+            this.layers.players.children.sort((a, b) => a.y - b.y);
+        }
 
         this.updateParticles();
         if (this.fpsText) this.fpsText.text = `FPS: ${game.fps}`;
     }
 
     private updatePlayerView(player: Player) {
-        let view = this.playerViews.get(player.id);
-        
-        if (!view) {
-            view = new PIXI.Container();
+        let cache = this.viewCache.get(player.id);
+
+        if (!cache) {
+            // ── Build view once, store ALL refs in cache ──────────────────
+            const view = new PIXI.Container();
             const bodyGroup = new PIXI.Container();
-            bodyGroup.label = "bodyGroup";
             const hudGroup = new PIXI.Container();
-            hudGroup.label = "hudGroup";
-            
+
             const glow = new PIXI.Sprite(this.glowTexture!);
             glow.anchor.set(0.5);
-            glow.label = "glow";
-            
+
+            // Mask via Graphics, but we'll use scale to resize it instead of
+            // redrawing every frame. Drawing at radius=1, then scale = player.radius.
+            const mask = new PIXI.Graphics().circle(0, 0, 1).fill(0xffffff);
+            mask.scale.set(player.radius);
+
             const avatarContainer = new PIXI.Container();
-            avatarContainer.label = "avatarContainer";
-            const mask = new PIXI.Graphics().circle(0, 0, player.radius).fill(0xffffff);
-            mask.label = "mask";
             avatarContainer.addChild(mask);
             avatarContainer.mask = mask;
-            
+
+            let avatarSprite: PIXI.Sprite | null = null;
             if (player.avatarImg) {
                 const texture = PIXI.Texture.from(player.avatarImg);
-                const sprite = new PIXI.Sprite(texture);
-                sprite.anchor.set(0.5);
-                sprite.label = "avatarSprite";
-                avatarContainer.addChild(sprite);
+                avatarSprite = new PIXI.Sprite(texture);
+                avatarSprite.anchor.set(0.5);
+                avatarSprite.width = player.radius * 2;
+                avatarSprite.height = player.radius * 2;
+                avatarContainer.addChild(avatarSprite);
             }
-            
-            const hpText = new PIXI.Text({
-                text: "10",
-                style: { fontFamily: 'Orbitron', fontSize: 14, fill: 0xffffff, fontWeight: '900', stroke: { color: 0x000000, width: 4 } }
+
+            // BitmapText: no per-update canvas redraws, single texture atlas for all chars
+            const hpText = new PIXI.BitmapText({
+                text: String(Math.ceil(player.hp)),
+                style: { fontFamily: "OrbitronHUD", fontSize: 14 },
             });
-            hpText.label = "hpText";
             hpText.anchor.set(0.5);
 
-            const nameText = new PIXI.Text({
+            const nameText = new PIXI.BitmapText({
                 text: player.id.toUpperCase(),
-                style: { fontFamily: 'Orbitron', fontSize: 14, fill: 0x00e5ff, fontWeight: '900', stroke: { color: 0x000000, width: 4 } }
+                style: { fontFamily: "OrbitronName", fontSize: 12 },
             });
-            nameText.label = "nameText";
             nameText.anchor.set(0.5);
+            nameText.y = -player.radius - 15;
 
+            const swordContainer = new PIXI.Container();
+
+            bodyGroup.addChild(swordContainer);
             bodyGroup.addChild(glow);
             bodyGroup.addChild(avatarContainer);
             hudGroup.addChild(hpText);
             hudGroup.addChild(nameText);
             view.addChild(bodyGroup);
             view.addChild(hudGroup);
-            
+
             this.layers.players.addChild(view);
-            this.playerViews.set(player.id, view);
+
+            cache = {
+                view,
+                bodyGroup,
+                hudGroup,
+                glow,
+                avatarContainer,
+                avatarSprite,
+                mask,
+                hpText,
+                nameText,
+                swordContainer,
+                swordSprites: [],
+                lastHp: -1,
+                lastRadius: player.radius,
+                lastSwordCount: 0,
+                lastMaskRadius: player.radius,
+            };
+            this.viewCache.set(player.id, cache);
         }
 
-        view.position.set(player.body.position.x, player.body.position.y);
-        
-        const bodyGroup = view.getChildByLabel("bodyGroup") as PIXI.Container;
-        bodyGroup.rotation = player.body.angle;
+        // ── Hot path: direct property access, ZERO getChildByLabel calls ──
 
-        const hudGroup = view.getChildByLabel("hudGroup") as PIXI.Container;
-        const glow = bodyGroup.getChildByLabel("glow") as PIXI.Sprite;
-        
+        cache.view.position.set(player.body.position.x, player.body.position.y);
+        cache.bodyGroup.rotation = player.body.angle;
+
+        // Glow tint
         let tint = 0x00ff41;
         if (player.isHit) tint = 0xff0000;
         else if ((player as any).healFlashTimer > 0) tint = 0x00ff00;
-        glow.tint = tint;
-        glow.width = glow.height = (player.radius + 4) * 2;
+        cache.glow.tint = tint;
 
-        const avatarContainer = bodyGroup.getChildByLabel("avatarContainer") as PIXI.Container;
-        const avatarSprite = avatarContainer.getChildByLabel("avatarSprite") as PIXI.Sprite;
-        const mask = avatarContainer.getChildByLabel("mask") as PIXI.Graphics;
+        // Only update sizes when radius actually changes (grow events are rare)
+        if (cache.lastRadius !== player.radius) {
+            cache.lastRadius = player.radius;
 
-        // Update sizes if grown
-        if (avatarSprite) {
-            avatarSprite.width = player.radius * 2;
-            avatarSprite.height = player.radius * 2;
+            cache.glow.width = cache.glow.height = (player.radius + 4) * 2;
+
+            if (cache.avatarSprite) {
+                cache.avatarSprite.width = player.radius * 2;
+                cache.avatarSprite.height = player.radius * 2;
+            }
+
+            // Resize mask via scale — no Graphics redraw, just a matrix update
+            cache.mask.scale.set(player.radius);
+
+            // Reposition name label
+            cache.nameText.y = -player.radius - 15;
+
+            // Scale BitmapText instead of changing fontSize (avoids font atlas rebuild)
+            const hpScale = Math.max(14, player.radius * 0.5) / 14;
+            cache.hpText.scale.set(hpScale);
+            const nameScale = Math.max(12, player.radius * 0.45) / 12;
+            cache.nameText.scale.set(nameScale);
         }
-        mask.clear().circle(0, 0, player.radius).fill(0xffffff);
 
-        const hpText = hudGroup.getChildByLabel("hpText") as PIXI.Text;
-        const nameText = hudGroup.getChildByLabel("nameText") as PIXI.Text;
+        // HP text: only update string when value changed
+        const hpVal = Math.ceil(player.hp);
+        if (cache.lastHp !== hpVal) {
+            cache.lastHp = hpVal;
+            cache.hpText.text = String(hpVal);
+        }
 
-        const hpVal = Math.ceil(player.hp).toString();
-        if (hpText.text !== hpVal) hpText.text = hpVal;
-        
-        hpText.style.fontSize = Math.max(14, player.radius * 0.5);
-        nameText.y = -player.radius - 15;
-        nameText.style.fontSize = Math.max(12, player.radius * 0.45);
-        
-        // Dynamic Sword Update
-        this.updateSwords(bodyGroup, player);
+        // Sword sprites
+        this.updateSwords(cache, player);
     }
 
-    private updateSwords(bodyGroup: PIXI.Container, player: Player) {
-        let swordContainer = bodyGroup.getChildByLabel("swords") as PIXI.Container;
-        if (!swordContainer) {
-            swordContainer = new PIXI.Container();
-            swordContainer.label = "swords";
-            bodyGroup.addChildAt(swordContainer, 0);
-        }
-
+    private updateSwords(cache: PlayerViewCache, player: Player) {
         const knifeParts = player.knifeParts;
         const localPositions = player.knifeLocalPositions;
         const localAngles = player.knifeLocalAngles;
+        const swordContainer = cache.swordContainer;
 
-        // Sync sprite count with player.swordCount
-        while (swordContainer.children.length < knifeParts.length) {
+        // Add sprites only when swordCount increases (rare event)
+        while (cache.swordSprites.length < knifeParts.length) {
             if (player.knifeImg) {
-                const sprite = new PIXI.Sprite(PIXI.Texture.from(player.knifeImg));
+                const sprite = new PIXI.Sprite(
+                    PIXI.Texture.from(player.knifeImg),
+                );
                 sprite.anchor.set(0.5);
                 swordContainer.addChild(sprite);
+                cache.swordSprites.push(sprite);
             } else break;
         }
-        
-        // Ensure unused sprites are hidden or removed (if swordCount decreased, though usually it only increases)
-        while (swordContainer.children.length > knifeParts.length) {
-            swordContainer.removeChildAt(swordContainer.children.length - 1);
+
+        // Remove if count ever decreases
+        while (cache.swordSprites.length > knifeParts.length) {
+            const s = cache.swordSprites.pop()!;
+            swordContainer.removeChild(s);
+            s.destroy();
         }
 
+        const targetH = 65 * (player.radius / 35);
+        const radiusChanged =
+            cache.lastSwordCount !== knifeParts.length ||
+            cache.lastMaskRadius !== player.radius;
+
         for (let i = 0; i < knifeParts.length; i++) {
-            const sprite = swordContainer.children[i] as PIXI.Sprite;
-            // Update local positions/rotations because they might change on grow() or addSword()
+            const sprite = cache.swordSprites[i];
             sprite.position.set(localPositions[i].x, localPositions[i].y);
             sprite.rotation = localAngles[i];
-            const targetH = 65 * (player.radius / 35);
-            sprite.height = targetH;
-            sprite.scale.x = sprite.scale.y;
+
+            // Height/scale update only needed when radius changes
+            if (radiusChanged) {
+                sprite.height = targetH;
+                sprite.scale.x = sprite.scale.y;
+            }
+        }
+
+        if (radiusChanged) {
+            cache.lastSwordCount = knifeParts.length;
+            cache.lastMaskRadius = player.radius;
         }
     }
 
     private updateParticles() {
         const ents = query(world, [Position, ParticleState]);
         const count = ents.length;
-        
+
         while (this.particlePool.length < count) {
             const s = new PIXI.Sprite(this.particleTexture!);
             s.anchor.set(0.5);
@@ -289,9 +426,10 @@ export class Renderer {
                 s.visible = true;
                 s.position.set(Position.x[eid], Position.y[eid]);
                 const life = ParticleState.life[eid];
-                s.alpha = Math.max(0, life / ParticleState.maxLife[eid]);
-                const colorHex = PARTICLE_COLORS[ParticleState.colorId[eid]] || '#ffffff';
-                s.tint = parseInt(colorHex.replace('#', '0x'));
+                s.alpha = life / ParticleState.maxLife[eid]; // Math.max(0,…) unnecessary: life >= 0 by design
+                // Use pre-parsed LUT instead of parseInt + replace every frame
+                s.tint =
+                    PARTICLE_COLOR_LUT[ParticleState.colorId[eid]] ?? 0xffffff;
             } else {
                 s.visible = false;
             }
@@ -299,8 +437,15 @@ export class Renderer {
     }
 
     public drawArena(x: number, y: number, w: number, h: number) {
+        // Dirty-check: skip redraw if arena hasn't moved/resized
+        const key = `${x},${y},${w},${h}`;
+        if (key === this.lastArenaKey) return;
+        this.lastArenaKey = key;
+
         this.arenaGraphic.clear();
-        this.arenaGraphic.rect(x, y, w, h).stroke({ width: 4, color: 0x00ff41 });
+        this.arenaGraphic
+            .rect(x, y, w, h)
+            .stroke({ width: 4, color: 0x00ff41 });
     }
 
     clear() {}
