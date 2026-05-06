@@ -5,7 +5,7 @@ export const GAME_CONFIG = {
     VICTORY_TIMER: 20000, // 20 detik countdown kemenangan
     RESTART_DELAY: 10000, // 10 detik delay restart setelah game over
     PLAYER_RADIUS: 35,
-    INITIAL_HP: 50,
+    INITIAL_HP: 5,
     HEAL_PER_TWO_HITS: 1,
 
     // ── PHYSICS ──
@@ -58,7 +58,7 @@ export const GAME_CONFIG = {
     PARTICLE_SIZE: 4,
     PARTICLE_GRAVITY: 0.2,
     PARTICLE_DECAY: 0.02,
-    GLOW_STROKE: 2,
+    GLOW_STROKE: 8,
     NAME_LABEL_OFFSET: 15,
     SORT_INTERVAL: 3,
 

@@ -266,8 +266,7 @@ export class Player {
             });
         }
 
-        // ── Update Sword Trails (Wind Effect) ──
-        // Use this.knifeParts directly — already maintained, no filter() needed
+        /* ── Sword Trails Disabled (Performance) ──
         const knifeParts = this.knifeParts;
         const knifeCount = knifeParts.length;
 
@@ -283,7 +282,6 @@ export class Player {
             const verts = kPart.vertices;
             const vLen = verts.length;
 
-            // Find two furthest vertices without sort() — O(n) single pass
             let best1 = 0,
                 best2 = 1;
             let dist1 = 0,
@@ -312,6 +310,7 @@ export class Player {
                 trail.shift();
             }
         }
+        */
     }
 
     destroy() {

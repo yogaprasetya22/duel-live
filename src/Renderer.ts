@@ -2,8 +2,9 @@ import * as PIXI from "pixi.js";
 import type { Game } from "./Game";
 import { Player } from "./Player";
 import { query } from "bitecs";
-import { world, Position, ParticleState, PARTICLE_COLORS } from "./ECS";
+import { world, Position, ParticleState } from "./ECS";
 import { GAME_CONFIG } from "./Config";
+import { InstancedParticleRenderer } from "./InstancedParticleRenderer";
 
 // ─── Cached references per player view ───────────────────────────────────────
 // Storing direct object references eliminates ALL getChildByLabel() calls in the
@@ -28,9 +29,7 @@ interface PlayerViewCache {
 }
 
 // Pre-parsed color LUT: avoids parseInt + string replace every particle frame
-const PARTICLE_COLOR_LUT: number[] = PARTICLE_COLORS.map((c) =>
-    parseInt(c.replace("#", ""), 16),
-);
+// (Particle colors are now handled by InstancedParticleRenderer)
 
 export class Renderer {
     public app: PIXI.Application;
@@ -45,9 +44,7 @@ export class Renderer {
     private bgVideoSprite: PIXI.Sprite | null = null;
 
     // Particle system
-    private particleContainer: PIXI.Container;
-    private particlePool: PIXI.Sprite[] = [];
-    private particleTexture: PIXI.Texture | null = null;
+    private instancedParticleRenderer: InstancedParticleRenderer | null = null;
 
     // Texture cache
     private glowTexture: PIXI.Texture | null = null;
@@ -77,7 +74,7 @@ export class Renderer {
             ui: new PIXI.Container(),
         };
 
-        this.particleContainer = new PIXI.Container();
+        this.instancedParticleRenderer = new InstancedParticleRenderer(20000);
         this.arenaGraphic = new PIXI.Graphics();
         this.hudGraphic = new PIXI.Graphics();
 
@@ -112,15 +109,13 @@ export class Renderer {
         this.app.stage.addChild(this.layers.ui);
 
         this.layers.grid.addChild(this.arenaGraphic);
-        this.layers.particles.addChild(this.particleContainer);
+        if (this.instancedParticleRenderer) {
+            this.layers.particles.addChild(this.instancedParticleRenderer.displayObject);
+        }
         this.layers.ui.addChild(this.hudGraphic);
 
-        const pg = new PIXI.Graphics().circle(0, 0, GAME_CONFIG.PARTICLE_SIZE).fill(0xffffff);
-        this.particleTexture = this.app.renderer.generateTexture(pg);
-        pg.destroy();
-
         const gg = new PIXI.Graphics()
-            .circle(0, 0, 50)
+            .circle(0, 0, 60)
             .stroke({ color: 0xffffff, width: GAME_CONFIG.GLOW_STROKE });
         this.glowTexture = this.app.renderer.generateTexture(gg);
         gg.destroy();
@@ -410,31 +405,9 @@ export class Renderer {
     }
 
     private updateParticles() {
+        if (!this.instancedParticleRenderer) return;
         const ents = query(world, [Position, ParticleState]);
-        const count = ents.length;
-
-        while (this.particlePool.length < count) {
-            const s = new PIXI.Sprite(this.particleTexture!);
-            s.anchor.set(0.5);
-            this.particleContainer.addChild(s);
-            this.particlePool.push(s);
-        }
-
-        for (let i = 0; i < this.particlePool.length; i++) {
-            const s = this.particlePool[i];
-            if (i < count) {
-                const eid = ents[i];
-                s.visible = true;
-                s.position.set(Position.x[eid], Position.y[eid]);
-                const life = ParticleState.life[eid];
-                s.alpha = life / ParticleState.maxLife[eid]; // Math.max(0,…) unnecessary: life >= 0 by design
-                // Use pre-parsed LUT instead of parseInt + replace every frame
-                s.tint =
-                    PARTICLE_COLOR_LUT[ParticleState.colorId[eid]] ?? 0xffffff;
-            } else {
-                s.visible = false;
-            }
-        }
+        this.instancedParticleRenderer.update(ents);
     }
 
     public drawArena(x: number, y: number, w: number, h: number) {

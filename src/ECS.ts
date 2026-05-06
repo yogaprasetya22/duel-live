@@ -4,30 +4,32 @@ import { createWorld, addEntity, addComponent } from 'bitecs';
 export const world = createWorld();
 
 // ── COMPONENTS (0.4.0 style: plain objects with arrays) ──
-// Note: We use Float32Array for better performance
+// Note: Increased capacity to 20,000 for high-density particle effects
+const MAX_ENTITIES = 20000;
+
 export const Position = {
-  x: new Float32Array(1000), // pre-allocate for 1000 entities
-  y: new Float32Array(1000),
+  x: new Float32Array(MAX_ENTITIES),
+  y: new Float32Array(MAX_ENTITIES),
 };
 
 export const Velocity = {
-  x: new Float32Array(1000),
-  y: new Float32Array(1000),
+  x: new Float32Array(MAX_ENTITIES),
+  y: new Float32Array(MAX_ENTITIES),
 };
 
 export const ParticleState = {
-  life: new Float32Array(1000),
-  maxLife: new Float32Array(1000),
-  colorId: new Uint8Array(1000),
+  life: new Float32Array(MAX_ENTITIES),
+  maxLife: new Float32Array(MAX_ENTITIES),
+  colorId: new Uint8Array(MAX_ENTITIES),
 };
 
 export const PlayerComponent = {
-  hp: new Float32Array(1000),
-  radius: new Float32Array(1000),
-  isHit: new Uint8Array(1000), // 0 or 1
-  hitFlashTimer: new Float32Array(1000),
-  healFlashTimer: new Float32Array(1000),
-  swordCount: new Uint8Array(1000),
+  hp: new Float32Array(MAX_ENTITIES),
+  radius: new Float32Array(MAX_ENTITIES),
+  isHit: new Uint8Array(MAX_ENTITIES), 
+  hitFlashTimer: new Float32Array(MAX_ENTITIES),
+  healFlashTimer: new Float32Array(MAX_ENTITIES),
+  swordCount: new Uint8Array(MAX_ENTITIES),
 };
 
 // Color mapping for fast rendering without strings

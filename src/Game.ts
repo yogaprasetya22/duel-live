@@ -12,6 +12,7 @@ import {
     createParticle,
 } from "./ECS";
 import { query, removeEntity } from "bitecs";
+import { SpatialHash } from "./SpatialHash";
 const { Engine, Events, Body, World } = Matter;
 
 export class Game {
@@ -50,6 +51,8 @@ export class Game {
     fps: number = 0;
     private frameCount_fps: number = 0;
     private lastFpsUpdate: number = 0;
+    private spatialHash: SpatialHash;
+    private queryResults: Int32Array = new Int32Array(128); // Pre-allocated query buffer
 
     constructor(canvas: HTMLCanvasElement) {
         this.canvas = canvas;
@@ -58,6 +61,13 @@ export class Game {
         const { engine, world } = createPhysicsWorld();
         this.engine = engine;
         this.world = world;
+
+        // Initialize Spatial Hash for unit interactions
+        this.spatialHash = new SpatialHash(
+            this.canvas.width,
+            this.canvas.height,
+            150, // Cell size
+        );
 
         this.initArena();
 
@@ -561,60 +571,51 @@ export class Game {
             const alivePlayers = this.players; // already filtered dead out above
             const frameCount = Math.floor(timestamp / 16);
 
-            // ── SPATIAL GRID FOR AI OPTIMIZATION ──
-            const grid: Map<string, Player[]> = new Map();
-            const cellSize = 150; // Spatial grid cell size
+            // ── OPTIMIZED SPATIAL GRID FOR AI ──
+            this.spatialHash.clear();
             for (let i = 0; i < alivePlayers.length; i++) {
                 const p = alivePlayers[i];
-                const gx = Math.floor(p.body.position.x / cellSize);
-                const gy = Math.floor(p.body.position.y / cellSize);
-                const key = `${gx},${gy}`;
-                if (!grid.has(key)) grid.set(key, []);
-                grid.get(key)!.push(p);
+                this.spatialHash.insert(i, p.body.position.x, p.body.position.y);
             }
 
             for (let i = 0; i < alivePlayers.length; i++) {
                 const player = alivePlayers[i];
 
                 let nearestOpponent: Player | null = null;
+                // Throttle targeting update to 2x per second per unit to save CPU
                 if ((frameCount + i) % 30 === 0) {
-                    let minDist = Infinity;
-                    const gx = Math.floor(player.body.position.x / cellSize);
-                    const gy = Math.floor(player.body.position.y / cellSize);
+                    let minDistSq = Infinity;
+                    const foundCount = this.spatialHash.query(
+                        player.body.position.x,
+                        player.body.position.y,
+                        300, // Search radius
+                        this.queryResults
+                    );
 
-                    // Check 3x3 cells around player
-                    for (let ox = -1; ox <= 1; ox++) {
-                        for (let oy = -1; oy <= 1; oy++) {
-                            const key = `${gx + ox},${gy + oy}`;
-                            const cell = grid.get(key);
-                            if (!cell) continue;
+                    for (let j = 0; j < foundCount; j++) {
+                        const otherIdx = this.queryResults[j];
+                        if (otherIdx === i) continue;
+                        const other = alivePlayers[otherIdx];
 
-                            for (const other of cell) {
-                                if (other === player) continue;
-                                const dx =
-                                    other.body.position.x -
-                                    player.body.position.x;
-                                const dy =
-                                    other.body.position.y -
-                                    player.body.position.y;
-                                const dist = dx * dx + dy * dy;
-                                if (dist < minDist) {
-                                    minDist = dist;
-                                    nearestOpponent = other;
-                                }
-                            }
+                        const dx = other.body.position.x - player.body.position.x;
+                        const dy = other.body.position.y - player.body.position.y;
+                        const distSq = dx * dx + dy * dy;
+                        if (distSq < minDistSq) {
+                            minDistSq = distSq;
+                            nearestOpponent = other;
                         }
                     }
 
-                    // Fallback to global search if no one is found in local grid
+                    // Fallback to global search ONLY if local grid is empty
                     if (!nearestOpponent) {
-                        for (const other of alivePlayers) {
-                            if (other === player) continue;
+                        for (let j = 0; j < alivePlayers.length; j++) {
+                            if (i === j) continue;
+                            const other = alivePlayers[j];
                             const dx = other.body.position.x - player.body.position.x;
                             const dy = other.body.position.y - player.body.position.y;
-                            const dist = dx * dx + dy * dy;
-                            if (dist < minDist) {
-                                minDist = dist;
+                            const distSq = dx * dx + dy * dy;
+                            if (distSq < minDistSq) {
+                                minDistSq = distSq;
                                 nearestOpponent = other;
                             }
                         }
