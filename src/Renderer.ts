@@ -3,6 +3,7 @@ import type { Game } from "./Game";
 import { Player } from "./Player";
 import { query } from "bitecs";
 import { world, Position, ParticleState, PARTICLE_COLORS } from "./ECS";
+import { GAME_CONFIG } from "./Config";
 
 // ─── Cached references per player view ───────────────────────────────────────
 // Storing direct object references eliminates ALL getChildByLabel() calls in the
@@ -56,7 +57,7 @@ export class Renderer {
 
     // Sort throttle: sort y-order every N frames (not every frame)
     private sortFrameCounter: number = 0;
-    private readonly SORT_INTERVAL = 3; // sort every 3 frames
+    private readonly SORT_INTERVAL = GAME_CONFIG.SORT_INTERVAL;
 
     private layers: {
         bg: PIXI.Container;
@@ -98,7 +99,7 @@ export class Renderer {
             canvas: canvas,
             width: window.innerWidth,
             height: window.innerHeight,
-            backgroundColor: 0x00050a,
+            backgroundColor: GAME_CONFIG.BG_COLOR,
             antialias: false,
             resolution: 1,
             autoDensity: true,
@@ -114,13 +115,13 @@ export class Renderer {
         this.layers.particles.addChild(this.particleContainer);
         this.layers.ui.addChild(this.hudGraphic);
 
-        const pg = new PIXI.Graphics().circle(0, 0, 4).fill(0xffffff);
+        const pg = new PIXI.Graphics().circle(0, 0, GAME_CONFIG.PARTICLE_SIZE).fill(0xffffff);
         this.particleTexture = this.app.renderer.generateTexture(pg);
         pg.destroy();
 
         const gg = new PIXI.Graphics()
             .circle(0, 0, 50)
-            .stroke({ color: 0xffffff, width: 2 });
+            .stroke({ color: 0xffffff, width: GAME_CONFIG.GLOW_STROKE });
         this.glowTexture = this.app.renderer.generateTexture(gg);
         gg.destroy();
 
@@ -130,11 +131,11 @@ export class Renderer {
         PIXI.BitmapFont.install({
             name: "OrbitronHUD",
             style: {
-                fontFamily: "Orbitron",
+                fontFamily: GAME_CONFIG.FONT_FAMILY,
                 fontSize: 32, // high base size; we'll scale down with BitmapText.scale
                 fill: 0xffffff,
                 fontWeight: "900",
-                stroke: { color: 0x000000, width: 6 },
+                stroke: { color: 0x000000, width: GAME_CONFIG.FONT_STROKE_WIDTH },
             },
             chars: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.:/ ",
             resolution: 1,
@@ -143,11 +144,11 @@ export class Renderer {
         PIXI.BitmapFont.install({
             name: "OrbitronName",
             style: {
-                fontFamily: "Orbitron",
+                fontFamily: GAME_CONFIG.FONT_FAMILY,
                 fontSize: 32,
                 fill: 0x00e5ff,
                 fontWeight: "900",
-                stroke: { color: 0x000000, width: 6 },
+                stroke: { color: 0x000000, width: GAME_CONFIG.FONT_STROKE_WIDTH },
             },
             chars: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.:/ _-",
             resolution: 1,
@@ -156,11 +157,11 @@ export class Renderer {
         PIXI.BitmapFont.install({
             name: "OrbitronFPS",
             style: {
-                fontFamily: "Orbitron",
+                fontFamily: GAME_CONFIG.FONT_FAMILY,
                 fontSize: 32,
                 fill: 0x00ff41,
                 fontWeight: "900",
-                stroke: { color: 0x000000, width: 6 },
+                stroke: { color: 0x000000, width: GAME_CONFIG.FONT_STROKE_WIDTH },
             },
             chars: "FPS:0123456789 ",
             resolution: 1,
@@ -168,7 +169,7 @@ export class Renderer {
 
         this.fpsText = new PIXI.BitmapText({
             text: "FPS: 60",
-            style: { fontFamily: "OrbitronFPS", fontSize: 16 },
+            style: { fontFamily: "OrbitronFPS", fontSize: GAME_CONFIG.FONT_SIZE_FPS },
         });
         this.fpsText.position.set(20, 20);
         this.layers.ui.addChild(this.fpsText);
@@ -271,16 +272,16 @@ export class Renderer {
             // BitmapText: no per-update canvas redraws, single texture atlas for all chars
             const hpText = new PIXI.BitmapText({
                 text: String(Math.ceil(player.hp)),
-                style: { fontFamily: "OrbitronHUD", fontSize: 14 },
+                style: { fontFamily: "OrbitronHUD", fontSize: GAME_CONFIG.FONT_SIZE_HUD },
             });
             hpText.anchor.set(0.5);
 
             const nameText = new PIXI.BitmapText({
                 text: player.id.toUpperCase(),
-                style: { fontFamily: "OrbitronName", fontSize: 12 },
+                style: { fontFamily: "OrbitronName", fontSize: GAME_CONFIG.FONT_SIZE_NAME },
             });
             nameText.anchor.set(0.5);
-            nameText.y = -player.radius - 15;
+            nameText.y = -player.radius - GAME_CONFIG.NAME_LABEL_OFFSET;
 
             const swordContainer = new PIXI.Container();
 
@@ -307,9 +308,9 @@ export class Renderer {
                 swordContainer,
                 swordSprites: [],
                 lastHp: -1,
-                lastRadius: player.radius,
+                lastRadius: -1,
                 lastSwordCount: 0,
-                lastMaskRadius: player.radius,
+                lastMaskRadius: -1,
             };
             this.viewCache.set(player.id, cache);
         }
@@ -320,7 +321,7 @@ export class Renderer {
         cache.bodyGroup.rotation = player.body.angle;
 
         // Glow tint
-        let tint = 0x00ff41;
+        let tint = GAME_CONFIG.ARENA_COLOR;
         if (player.isHit) tint = 0xff0000;
         else if ((player as any).healFlashTimer > 0) tint = 0x00ff00;
         cache.glow.tint = tint;
@@ -329,7 +330,7 @@ export class Renderer {
         if (cache.lastRadius !== player.radius) {
             cache.lastRadius = player.radius;
 
-            cache.glow.width = cache.glow.height = (player.radius + 4) * 2;
+            cache.glow.width = cache.glow.height = player.radius * 2;
 
             if (cache.avatarSprite) {
                 cache.avatarSprite.width = player.radius * 2;
@@ -340,12 +341,12 @@ export class Renderer {
             cache.mask.scale.set(player.radius);
 
             // Reposition name label
-            cache.nameText.y = -player.radius - 15;
+            cache.nameText.y = -player.radius - GAME_CONFIG.NAME_LABEL_OFFSET;
 
             // Scale BitmapText instead of changing fontSize (avoids font atlas rebuild)
-            const hpScale = Math.max(14, player.radius * 0.5) / 14;
+            const hpScale = Math.max(GAME_CONFIG.FONT_SIZE_HUD, player.radius * 0.5) / GAME_CONFIG.FONT_SIZE_HUD;
             cache.hpText.scale.set(hpScale);
-            const nameScale = Math.max(12, player.radius * 0.45) / 12;
+            const nameScale = Math.max(GAME_CONFIG.FONT_SIZE_NAME, player.radius * 0.45) / GAME_CONFIG.FONT_SIZE_NAME;
             cache.nameText.scale.set(nameScale);
         }
 
@@ -385,7 +386,7 @@ export class Renderer {
             s.destroy();
         }
 
-        const targetH = 65 * (player.radius / 35);
+        const targetH = GAME_CONFIG.KNIFE_HEIGHT * (player.radius / GAME_CONFIG.PLAYER_RADIUS);
         const radiusChanged =
             cache.lastSwordCount !== knifeParts.length ||
             cache.lastMaskRadius !== player.radius;
@@ -445,7 +446,7 @@ export class Renderer {
         this.arenaGraphic.clear();
         this.arenaGraphic
             .rect(x, y, w, h)
-            .stroke({ width: 4, color: 0x00ff41 });
+            .stroke({ width: GAME_CONFIG.ARENA_STROKE, color: GAME_CONFIG.ARENA_COLOR });
     }
 
     clear() {}

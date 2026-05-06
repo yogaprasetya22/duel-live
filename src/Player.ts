@@ -4,11 +4,11 @@ import { GAME_CONFIG } from "./Config";
 const { Bodies, World, Body } = Matter;
 
 const CIRCLE_OPTIONS = {
-    restitution: 1.2, // Extremely bouncy
-    friction: 0.05,
-    frictionAir: 0.08, // Very high damping for "smooth/slow" feel
-    frictionStatic: 0.05,
-    density: 0.01, // Higher density to feel more solid
+    restitution: GAME_CONFIG.PLAYER_RESTITUTION,
+    friction: GAME_CONFIG.PLAYER_FRICTION,
+    frictionAir: GAME_CONFIG.PLAYER_FRICTION_AIR,
+    frictionStatic: GAME_CONFIG.PLAYER_FRICTION_STATIC,
+    density: GAME_CONFIG.PLAYER_DENSITY,
     label: "player",
 };
 
@@ -16,7 +16,7 @@ export class Player {
     world: Matter.World;
     id: string;
     radius: number;
-    hp: number = 50;
+    hp: number = GAME_CONFIG.INITIAL_HP;
     isDead: boolean = false;
     hitCooldown: number = 0;
     isHit: boolean = false;
@@ -54,7 +54,7 @@ export class Player {
         this.avatarImg = avatarImg;
         this.knifeImg = knifeImg;
 
-        this.knifeOffsetDistance = radius + 28;
+        this.knifeOffsetDistance = radius + GAME_CONFIG.KNIFE_OFFSET;
         this.knifeLocalAngle = Math.PI / 2;
 
         const playerIndex = Math.floor(Math.random() * 10);
@@ -77,9 +77,9 @@ export class Player {
         (circlePart as any).playerId = this.id;
 
         // Scale knife based on current radius (baseline radius is 35)
-        const scaleFactor = this.radius / 35;
-        const knifeWidth = 12 * scaleFactor;
-        const knifeHeight = 65 * scaleFactor;
+        const scaleFactor = this.radius / GAME_CONFIG.PLAYER_RADIUS;
+        const knifeWidth = GAME_CONFIG.KNIFE_WIDTH * scaleFactor;
+        const knifeHeight = GAME_CONFIG.KNIFE_HEIGHT * scaleFactor;
         const parts = [circlePart];
 
         for (let i = 0; i < this.swordCount; i++) {
@@ -108,15 +108,20 @@ export class Player {
             this.knifeLocalAngles.push(angle + Math.PI / 2);
         }
 
-        return Body.create({
+        const body = Body.create({
             parts: parts,
-            frictionAir: 0.08, // Increased from 0.005 for slower feel
-            restitution: 0.5,
+            frictionAir: GAME_CONFIG.PLAYER_FRICTION_AIR,
+            restitution: GAME_CONFIG.PLAYER_RESTITUTION,
         });
+
+        // Reduce inertia to make it spin more easily on impact
+        Body.setInertia(body, body.inertia * 0.5);
+
+        return body;
     }
 
     addSword() {
-        if (this.swordCount >= 20) return;
+        if (this.swordCount >= GAME_CONFIG.MAX_SWORDS) return;
         this.swordCount++;
         this.recreateBody();
     }
@@ -161,8 +166,8 @@ export class Player {
     applyInitialImpulse() {
         const direction = Math.random() > 0.5 ? 1 : -1;
         Body.applyForce(this.body, this.body.position, {
-            x: direction * 0.08,
-            y: -0.15,
+            x: direction * GAME_CONFIG.PLAYER_INITIAL_IMPULSE_X,
+            y: GAME_CONFIG.PLAYER_INITIAL_IMPULSE_Y,
         });
     }
 
@@ -184,13 +189,13 @@ export class Player {
 
     heal(amount: number) {
         this.hp += amount;
-        this.healFlashTimer = 300; // 300ms green flash
+        this.healFlashTimer = GAME_CONFIG.HEAL_FLASH_DURATION;
     }
 
     onHitDealt() {
         this.hitsDealt++;
         if (this.hitsDealt >= 2) {
-            this.heal(1);
+            this.heal(GAME_CONFIG.HEAL_PER_TWO_HITS);
             this.hitsDealt = 0;
         }
     }
@@ -228,7 +233,7 @@ export class Player {
             const dy = opponentBody.position.y - this.body.position.y;
             const dist = Math.sqrt(dx * dx + dy * dy);
 
-            const pull = 0.0008; // Reduced from 0.0015
+            const pull = GAME_CONFIG.PLAYER_PULL_FORCE;
             Body.applyForce(this.body, this.body.position, {
                 x: (dx / dist) * pull,
                 y: (dy / dist) * pull,

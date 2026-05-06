@@ -5,7 +5,7 @@ const { Bodies, World } = Matter;
 
 const WALL_OPTIONS = {
   isStatic: true,
-  restitution: 1.0,
+  restitution: GAME_CONFIG.PLAYER_RESTITUTION,
   friction: 0,
   frictionStatic: 0,
   label: 'wall'
@@ -28,8 +28,8 @@ export function createArena(world: Matter.World, arenaX: number, arenaY: number,
   ];
 
   // ── GANJELAN (Wedges/Obstacles) ──
-  const wedgeW = 8;
-  const wedgeH = 35;
+  const wedgeW = GAME_CONFIG.WEDGE_WIDTH;
+  const wedgeH = GAME_CONFIG.WEDGE_HEIGHT;
   const floorY = arenaY + arenaH;
   
   const obstacles = [

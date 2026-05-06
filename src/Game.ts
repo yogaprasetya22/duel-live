@@ -30,7 +30,7 @@ export class Game {
     winner: string | null = null;
     lastTime: number = 0;
     victoryTimer: number = GAME_CONFIG.VICTORY_TIMER;
-    restartTimer: number = 10000; // 10 seconds to restart
+    restartTimer: number = GAME_CONFIG.RESTART_DELAY;
     knifeImg: HTMLImageElement | null = null;
     bgImg: HTMLImageElement | null = null;
     avatarImgs: HTMLImageElement[] = [];
@@ -43,12 +43,7 @@ export class Game {
     respawnCooldowns: Map<string, number> = new Map();
     readonly MAX_PLAYERS = GAME_CONFIG.MAX_PLAYERS;
 
-    bgmPlaylist: string[] = [
-        "/music.mp3",
-        "/music1.mp3",
-        "/music2.mp3",
-        "/music3.mp3",
-    ];
+    bgmPlaylist = GAME_CONFIG.BGM_PLAYLIST;
     currentBgmIndex: number = 0;
     bgmAudio: HTMLAudioElement | null = null;
     lastSfxTime: number = 0;
@@ -206,8 +201,8 @@ export class Game {
                 y: Math.sin(angle) * force,
             });
         } else {
-            // Spawn new player (Instant respawn if dead)
-            this.spawnNewPlayer(data.profilePictureUrl, userId);
+            // Queue new player spawn
+            this.queueSpawn(data.profilePictureUrl, userId);
         }
     }
 
@@ -218,7 +213,7 @@ export class Game {
 
         const player = this.tiktokUsers.get(userId);
         if (!player || player.isDead) {
-            this.spawnNewPlayer(data.profilePictureUrl, userId);
+            this.queueSpawn(data.profilePictureUrl, userId);
         }
     }
 
@@ -228,9 +223,7 @@ export class Game {
 
         // Respawn if dead or not exists
         if (!player || player.isDead) {
-            this.spawnNewPlayer(data.profilePictureUrl, userId);
-            // Wait a bit for spawn to finish or just use the new ref if we can
-            // For now, we'll try to find it again after a tick or just let the next gift trigger it
+            this.queueSpawn(data.profilePictureUrl, userId);
             player = this.tiktokUsers.get(userId);
         }
 
@@ -256,7 +249,7 @@ export class Game {
             const profilePic =
                 data.profilePictureUrl ||
                 `https://api.dicebear.com/7.x/pixel-art/svg?seed=${userId}`;
-            this.spawnNewPlayer(profilePic, userId);
+            this.queueSpawn(profilePic, userId);
         }
 
         this.players.forEach((p) => {
@@ -268,6 +261,15 @@ export class Game {
                 });
             }
         });
+    }
+
+    queueSpawn(avatarUrl: string, name: string) {
+        // Prevent duplicate queue entries or spawning if already alive/pending
+        if (this.pendingSpawns.has(name)) return;
+        if (this.tiktokUsers.has(name) && !this.tiktokUsers.get(name)?.isDead) return;
+        if (this.queue.some(q => q.name === name)) return;
+
+        this.queue.push({ avatarUrl, name });
     }
 
     async spawnNewPlayer(avatarUrl: string, name: string) {
@@ -390,7 +392,7 @@ export class Game {
     startMusic() {
         if (!this.bgmAudio) {
             this.bgmAudio = new Audio();
-            this.bgmAudio.volume = 0.6;
+            this.bgmAudio.volume = GAME_CONFIG.BGM_VOLUME;
             this.bgmAudio.onended = () => {
                 this.currentBgmIndex =
                     (this.currentBgmIndex + 1) % this.bgmPlaylist.length;
@@ -534,7 +536,7 @@ export class Game {
             }
 
             while (
-                this.players.length < this.MAX_PLAYERS &&
+                this.players.length + this.pendingSpawns.size < this.MAX_PLAYERS &&
                 this.queue.length > 0
             ) {
                 const next = this.queue.shift();
@@ -547,9 +549,9 @@ export class Game {
 
                 Position.x[eid] += Velocity.x[eid];
                 Position.y[eid] += Velocity.y[eid];
-                Velocity.y[eid] += 0.2;
+                Velocity.y[eid] += GAME_CONFIG.PARTICLE_GRAVITY;
 
-                ParticleState.life[eid] -= 0.02;
+                ParticleState.life[eid] -= GAME_CONFIG.PARTICLE_DECAY;
 
                 if (ParticleState.life[eid] <= 0) {
                     removeEntity(world, eid);
@@ -561,7 +563,7 @@ export class Game {
 
             // ── SPATIAL GRID FOR AI OPTIMIZATION ──
             const grid: Map<string, Player[]> = new Map();
-            const cellSize = 150;
+            const cellSize = 150; // Spatial grid cell size
             for (let i = 0; i < alivePlayers.length; i++) {
                 const p = alivePlayers[i];
                 const gx = Math.floor(p.body.position.x / cellSize);
@@ -603,6 +605,20 @@ export class Game {
                             }
                         }
                     }
+
+                    // Fallback to global search if no one is found in local grid
+                    if (!nearestOpponent) {
+                        for (const other of alivePlayers) {
+                            if (other === player) continue;
+                            const dx = other.body.position.x - player.body.position.x;
+                            const dy = other.body.position.y - player.body.position.y;
+                            const dist = dx * dx + dy * dy;
+                            if (dist < minDist) {
+                                minDist = dist;
+                                nearestOpponent = other;
+                            }
+                        }
+                    }
                     (player as any).lastTarget = nearestOpponent;
                 } else {
                     nearestOpponent = (player as any).lastTarget;
@@ -620,9 +636,10 @@ export class Game {
                 if (py < this.arenaY - margin) pushY = 1;
                 if (py > this.arenaY + this.arenaH + margin) pushY = -1;
                 if (pushX !== 0 || pushY !== 0) {
+                    const pushForce = 5;
                     Body.setVelocity(player.body, {
-                        x: player.body.velocity.x * 0.5 + pushX * 5,
-                        y: player.body.velocity.y * 0.5 + pushY * 5,
+                        x: player.body.velocity.x * 0.5 + pushX * pushForce,
+                        y: player.body.velocity.y * 0.5 + pushY * pushForce,
                     });
                     Body.setPosition(player.body, {
                         x: Math.max(
@@ -669,7 +686,7 @@ export class Game {
     }
 
     getPlayerColor(index: number) {
-        const colors = ["#00E5FF", "#FF1744", "#00E676", "#D1C4E9", "#FFD600"];
+        const colors = GAME_CONFIG.PLAYER_COLORS;
         return colors[index % colors.length];
     }
 }
