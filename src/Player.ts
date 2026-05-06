@@ -30,8 +30,9 @@ export class Player {
     knifeLocalAngle: number;
     body: Matter.Body;
     behaviorTimer: number = 0;
-    trail: { x: number; y: number }[] = [];
-    swordTrails: { x: number; y: number }[][] = [];
+    trail: Float32Array; 
+    swordTrails: Float32Array[] = [];
+    swordTrailIndices: Uint32Array = new Uint32Array(0);
     maxTrailLength: number = GAME_CONFIG.MAX_TRAIL_LENGTH;
     swordCount: number = 1;
     category: number;
@@ -62,10 +63,12 @@ export class Player {
 
         this.body = this.createBody(x, y);
         World.add(world, this.body);
+
+        // Pre-allocate trails as Float32Arrays [x0, y0, x1, y1, ...]
+        this.trail = new Float32Array(this.maxTrailLength * 2);
     }
 
     createBody(x: number, y: number) {
-        // Always reset these before populating — recreateBody calls createBody again
         this.knifeParts = [];
         this.knifeLocalPositions = [];
         this.knifeLocalAngles = [];
@@ -76,15 +79,16 @@ export class Player {
         });
         (circlePart as any).playerId = this.id;
 
-        // Scale knife based on current radius (baseline radius is 35)
+        const parts = [circlePart];
+        const maxSwords = GAME_CONFIG.MAX_SWORDS;
+
+        // Baseline scale factor
         const scaleFactor = this.radius / GAME_CONFIG.PLAYER_RADIUS;
         const knifeWidth = GAME_CONFIG.KNIFE_WIDTH * scaleFactor;
         const knifeHeight = GAME_CONFIG.KNIFE_HEIGHT * scaleFactor;
-        const parts = [circlePart];
 
-        for (let i = 0; i < this.swordCount; i++) {
-            // Calculate angle for each sword (evenly spaced)
-            const angle = Math.PI / 2 + i * ((Math.PI * 2) / this.swordCount);
+        for (let i = 0; i < maxSwords; i++) {
+            const angle = Math.PI / 2 + i * ((Math.PI * 2) / maxSwords);
             const dist = this.radius + knifeHeight / 2;
 
             const kx = x + Math.cos(angle) * dist;
@@ -98,7 +102,11 @@ export class Player {
                 {
                     ...CIRCLE_OPTIONS,
                     label: "player-knife",
-                    angle: angle - Math.PI / 2, // Rotate to face outward
+                    angle: angle - Math.PI / 2,
+                    isSensor: i >= this.swordCount, // Only first 'swordCount' are active
+                    collisionFilter: {
+                        mask: i < this.swordCount ? 0xFFFFFFFF : 0 // Disable collision for inactive swords
+                    }
                 },
             );
             (knifePart as any).playerId = this.id;
@@ -114,41 +122,75 @@ export class Player {
             restitution: GAME_CONFIG.PLAYER_RESTITUTION,
         });
 
-        // Reduce inertia to make it spin more easily on impact
         Body.setInertia(body, body.inertia * 0.5);
-
         return body;
     }
 
     addSword() {
         if (this.swordCount >= GAME_CONFIG.MAX_SWORDS) return;
         this.swordCount++;
-        this.recreateBody();
+        this.repositionSwords();
     }
 
+    repositionSwords() {
+        const maxSwords = GAME_CONFIG.MAX_SWORDS;
+        const activeCount = this.swordCount;
+        const scaleFactor = this.radius / GAME_CONFIG.PLAYER_RADIUS;
+        const knifeHeight = GAME_CONFIG.KNIFE_HEIGHT * scaleFactor;
+        const dist = this.radius + knifeHeight / 2;
+
+        for (let i = 0; i < maxSwords; i++) {
+            const kp = this.knifeParts[i];
+            const isActive = i < activeCount;
+
+            kp.isSensor = !isActive;
+            kp.collisionFilter.mask = isActive ? 0xFFFFFFFF : 0;
+
+            if (isActive) {
+                // Kalkulasi ulang sudut agar proporsional (seperti sebelumnya)
+                const angle = Math.PI / 2 + i * ((Math.PI * 2) / activeCount);
+                
+                // Update posisi lokal
+                const lx = Math.cos(angle) * dist;
+                const ly = Math.sin(angle) * dist;
+                
+                this.knifeLocalPositions[i] = { x: lx, y: ly };
+                this.knifeLocalAngles[i] = angle + Math.PI / 2;
+
+                // Update posisi fisik relatif ke body
+                const worldX = this.body.position.x + lx;
+                const worldY = this.body.position.y + ly;
+                Body.setPosition(kp, { x: worldX, y: worldY });
+                Body.setAngle(kp, angle - Math.PI / 2);
+            }
+        }
+    }
     grow(factor: number) {
         this.radius *= factor;
         this.knifeOffsetDistance *= factor;
-        this.recreateBody();
+        
+        // Use efficient physics scaling
+        Body.scale(this.body, factor, factor);
+        
+        // Notify game/renderer if needed (Renderer already checks radius change every frame)
     }
 
-    recreateBody() {
-        const oldPos = { ...this.body.position };
-        const oldVel = { ...this.body.velocity };
-        const oldAngle = this.body.angle;
-        const oldAngVel = this.body.angularVelocity;
-
-        World.remove(this.world, this.body);
-        this.body = this.createBody(oldPos.x, oldPos.y); // createBody resets knifeParts internally
-        Body.setVelocity(this.body, oldVel);
-        Body.setAngle(this.body, oldAngle);
-        Body.setAngularVelocity(this.body, oldAngVel);
-        World.add(this.world, this.body);
-
-        // Notify game to remap body→player (called externally via onBodyRecreated)
-        if (typeof (this as any)._onBodyRecreated === "function") {
-            (this as any)._onBodyRecreated(this);
-        }
+    // Reset player for pooling
+    reset(x: number, y: number, name: string, avatar: HTMLImageElement | null) {
+        this.id = name;
+        this.avatarImg = avatar;
+        this.hp = GAME_CONFIG.INITIAL_HP;
+        this.isDead = false;
+        this.swordCount = 1;
+        this.hitsDealt = 0;
+        
+        // Reset physics
+        Body.setPosition(this.body, { x, y });
+        Body.setVelocity(this.body, { x: 0, y: 0 });
+        Body.setAngle(this.body, 0);
+        Body.setAngularVelocity(this.body, 0);
+        
+        this.repositionSwords();
     }
 
     getKnifeWorldTransform() {
@@ -194,8 +236,8 @@ export class Player {
 
     onHitDealt() {
         this.hitsDealt++;
-        if (this.hitsDealt >= 2) {
-            this.heal(GAME_CONFIG.HEAL_PER_TWO_HITS);
+        if (this.hitsDealt >= 3) {
+            this.heal(GAME_CONFIG.HEAL_PER_THREE_HITS);
             this.hitsDealt = 0;
         }
     }
@@ -266,51 +308,34 @@ export class Player {
             });
         }
 
-        /* ── Sword Trails Disabled (Performance) ──
+        // ── Update Sword Trails (Circular Buffer - Zero Allocation) ──
         const knifeParts = this.knifeParts;
         const knifeCount = knifeParts.length;
 
         if (this.swordTrails.length !== knifeCount) {
-            this.swordTrails = Array.from({ length: knifeCount }, () => []);
+            // Re-allocate only when sword count changes
+            this.swordTrails = Array.from({ length: knifeCount }, () => new Float32Array(GAME_CONFIG.SWORD_TRAIL_LENGTH * 2));
+            this.swordTrailIndices = new Uint32Array(knifeCount);
         }
-
-        const cx = this.body.position.x;
-        const cy = this.body.position.y;
 
         for (let i = 0; i < knifeCount; i++) {
             const kPart = knifeParts[i];
             const verts = kPart.vertices;
-            const vLen = verts.length;
 
-            let best1 = 0,
-                best2 = 1;
-            let dist1 = 0,
-                dist2 = 0;
-            for (let v = 0; v < vLen; v++) {
-                const dx = verts[v].x - cx;
-                const dy = verts[v].y - cy;
-                const d = dx * dx + dy * dy;
-                if (d > dist1) {
-                    dist2 = dist1;
-                    best2 = best1;
-                    dist1 = d;
-                    best1 = v;
-                } else if (d > dist2) {
-                    dist2 = d;
-                    best2 = v;
-                }
-            }
-
-            const tipX = (verts[best1].x + verts[best2].x) * 0.5;
-            const tipY = (verts[best1].y + verts[best2].y) * 0.5;
+            // Tip of the knife
+            const tipX = (verts[0].x + verts[1].x) * 0.5;
+            const tipY = (verts[0].y + verts[1].y) * 0.5;
 
             const trail = this.swordTrails[i];
-            trail.push({ x: tipX, y: tipY });
-            if (trail.length > GAME_CONFIG.SWORD_TRAIL_LENGTH) {
-                trail.shift();
-            }
+            const head = this.swordTrailIndices[i];
+            
+            // Insert at current head
+            trail[head * 2] = tipX;
+            trail[head * 2 + 1] = tipY;
+            
+            // Move head forward (wrap around)
+            this.swordTrailIndices[i] = (head + 1) % GAME_CONFIG.SWORD_TRAIL_LENGTH;
         }
-        */
     }
 
     destroy() {

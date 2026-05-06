@@ -6,7 +6,8 @@ export const GAME_CONFIG = {
     RESTART_DELAY: 10000, // 10 detik delay restart setelah game over
     PLAYER_RADIUS: 35,
     INITIAL_HP: 5,
-    HEAL_PER_TWO_HITS: 1,
+    HEAL_PER_THREE_HITS: 1,
+    GIFT_HP_BONUS: 5,
 
     // ── PHYSICS ──
     GRAVITY: 0.1, // Lower gravity for a "floaty" feel
@@ -58,7 +59,7 @@ export const GAME_CONFIG = {
     PARTICLE_SIZE: 4,
     PARTICLE_GRAVITY: 0.2,
     PARTICLE_DECAY: 0.02,
-    GLOW_STROKE: 8,
+    GLOW_STROKE: 2,
     NAME_LABEL_OFFSET: 15,
     SORT_INTERVAL: 3,
 

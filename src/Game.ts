@@ -4,6 +4,7 @@ import { createArena } from "./Arena";
 import { Player } from "./Player";
 import { Renderer } from "./Renderer";
 import { GAME_CONFIG } from "./Config";
+import { SpatialHash } from "./SpatialHash";
 import {
     world,
     Position,
@@ -12,7 +13,6 @@ import {
     createParticle,
 } from "./ECS";
 import { query, removeEntity } from "bitecs";
-import { SpatialHash } from "./SpatialHash";
 const { Engine, Events, Body, World } = Matter;
 
 export class Game {
@@ -42,6 +42,7 @@ export class Game {
     shakeAmount: number = 0;
     queue: { avatarUrl: string; name: string }[] = [];
     respawnCooldowns: Map<string, number> = new Map();
+    playerPool: Player[] = [];
     readonly MAX_PLAYERS = GAME_CONFIG.MAX_PLAYERS;
 
     bgmPlaylist = GAME_CONFIG.BGM_PLAYLIST;
@@ -51,23 +52,17 @@ export class Game {
     fps: number = 0;
     private frameCount_fps: number = 0;
     private lastFpsUpdate: number = 0;
-    private spatialHash: SpatialHash;
-    private queryResults: Int32Array = new Int32Array(128); // Pre-allocated query buffer
+    private spatialHash!: SpatialHash;
+    private queryBuffer: Uint32Array = new Uint32Array(512); // Pre-allocated buffer for search
 
     constructor(canvas: HTMLCanvasElement) {
+        this.spatialHash = new SpatialHash(2000, 2000, 150);
         this.canvas = canvas;
         this.renderer = new Renderer(canvas);
 
         const { engine, world } = createPhysicsWorld();
         this.engine = engine;
         this.world = world;
-
-        // Initialize Spatial Hash for unit interactions
-        this.spatialHash = new SpatialHash(
-            this.canvas.width,
-            this.canvas.height,
-            150, // Cell size
-        );
 
         this.initArena();
 
@@ -240,7 +235,7 @@ export class Game {
         if (player && !player.isDead) {
             // Gift 1 coin = +50 HP
             const diamonds = data.diamondCount || 1;
-            player.hp += diamonds * 50;
+            player.hp += diamonds * GAME_CONFIG.GIFT_HP_BONUS;
 
             // Grow size: 2% per diamond
             player.grow(1 + 0.02 * diamonds);
@@ -284,10 +279,13 @@ export class Game {
 
     async spawnNewPlayer(avatarUrl: string, name: string) {
         if (this.pendingSpawns.has(name)) return;
-        if (this.tiktokUsers.has(name) && !this.tiktokUsers.get(name)?.isDead)
-            return;
+        if (this.tiktokUsers.has(name) && !this.tiktokUsers.get(name)?.isDead) return;
 
         this.pendingSpawns.add(name);
+
+        let newPlayer: Player;
+        const x = this.arenaX + Math.random() * this.arenaW;
+        const y = this.arenaY + Math.random() * this.arenaH;
 
         const img = new Image();
         img.crossOrigin = "anonymous";
@@ -301,42 +299,35 @@ export class Game {
             new Promise((resolve) => setTimeout(resolve, 3000)),
         ]);
 
-        const r = GAME_CONFIG.PLAYER_RADIUS;
-        const x = this.arenaX + Math.random() * this.arenaW;
-        const y = this.arenaY + Math.random() * this.arenaH;
-
         const avatarToUse = img.complete
             ? img
-            : this.avatarImgs[
-                  Math.floor(Math.random() * this.avatarImgs.length)
-              ];
+            : this.avatarImgs[Math.floor(Math.random() * this.avatarImgs.length)];
 
-        const newPlayer = new Player(
-            this.world,
-            x,
-            y,
-            r,
-            name.substring(0, 8),
-            avatarToUse,
-            this.knifeImg,
-        );
+        // REUSE FROM POOL OR CREATE NEW
+        if (this.playerPool.length > 0) {
+            newPlayer = this.playerPool.pop()!;
+            newPlayer.reset(x, y, name.substring(0, 8), avatarToUse);
+            World.add(this.world, newPlayer.body); // Put back into physics world
+        } else {
+            const r = GAME_CONFIG.PLAYER_RADIUS;
+            newPlayer = new Player(
+                this.world,
+                x,
+                y,
+                r,
+                name.substring(0, 8),
+                avatarToUse,
+                this.knifeImg,
+            );
+        }
+
         newPlayer.tiktokProfileImg = img.complete ? img : null;
-
         newPlayer.applyInitialImpulse();
+        
         this.players.push(newPlayer);
         this.tiktokUsers.set(name, newPlayer);
         this.registerPlayerBody(newPlayer);
-        // Keep bodyPlayerMap in sync when player grows/adds sword (body is recreated)
-        (newPlayer as any)._onBodyRecreated = (p: Player) => {
-            // old body already removed from world; remove stale map entry and add new one
-            for (const [body, player] of this.bodyPlayerMap) {
-                if (player === p) {
-                    this.bodyPlayerMap.delete(body);
-                    break;
-                }
-            }
-            this.bodyPlayerMap.set(p.body, p);
-        };
+        
         this.pendingSpawns.delete(name);
     }
 
@@ -510,15 +501,16 @@ export class Game {
             const deadPlayers = this.players.filter((p) => p.isDead);
             if (deadPlayers.length > 0) {
                 deadPlayers.forEach((player) => {
-                    this.unregisterPlayerBody(player); // remove from O(1) map
-                    player.destroy();
+                    this.unregisterPlayerBody(player);
+                    World.remove(this.world, player.body); // Take out of physics world
                     this.tiktokUsers.delete(player.id);
                     this.respawnCooldowns.set(
                         player.id,
                         Date.now() + GAME_CONFIG.RESPAWN_COOLDOWN,
                     );
-                    // Clear sword trails for dead players
-                    player.swordTrails.forEach((t) => (t.length = 0));
+                    
+                    // Push to pool instead of destroying
+                    this.playerPool.push(player);
 
                     // AUTO-RESPAWN logic
                     if (this.activeMembers.has(player.id)) {
@@ -571,7 +563,7 @@ export class Game {
             const alivePlayers = this.players; // already filtered dead out above
             const frameCount = Math.floor(timestamp / 16);
 
-            // ── OPTIMIZED SPATIAL GRID FOR AI ──
+            // ── SPATIAL GRID FOR AI OPTIMIZATION (ZERO ALLOCATION) ──
             this.spatialHash.clear();
             for (let i = 0; i < alivePlayers.length; i++) {
                 const p = alivePlayers[i];
@@ -582,40 +574,42 @@ export class Game {
                 const player = alivePlayers[i];
 
                 let nearestOpponent: Player | null = null;
-                // Throttle targeting update to 2x per second per unit to save CPU
                 if ((frameCount + i) % 30 === 0) {
-                    let minDistSq = Infinity;
+                    let minDist = Infinity;
+                    
+                    // Search in nearby cells
                     const foundCount = this.spatialHash.query(
                         player.body.position.x,
                         player.body.position.y,
                         300, // Search radius
-                        this.queryResults
+                        this.queryBuffer
                     );
 
                     for (let j = 0; j < foundCount; j++) {
-                        const otherIdx = this.queryResults[j];
-                        if (otherIdx === i) continue;
+                        const otherIdx = this.queryBuffer[j];
                         const other = alivePlayers[otherIdx];
-
+                        
+                        if (other === player) continue;
+                        
                         const dx = other.body.position.x - player.body.position.x;
                         const dy = other.body.position.y - player.body.position.y;
-                        const distSq = dx * dx + dy * dy;
-                        if (distSq < minDistSq) {
-                            minDistSq = distSq;
+                        const dist = dx * dx + dy * dy;
+                        if (dist < minDist) {
+                            minDist = dist;
                             nearestOpponent = other;
                         }
                     }
 
-                    // Fallback to global search ONLY if local grid is empty
-                    if (!nearestOpponent) {
+                    // Fallback to global search (O(N)) ONLY IF NO ONE NEARBY
+                    if (!nearestOpponent && alivePlayers.length > 1) {
                         for (let j = 0; j < alivePlayers.length; j++) {
-                            if (i === j) continue;
                             const other = alivePlayers[j];
+                            if (other === player) continue;
                             const dx = other.body.position.x - player.body.position.x;
                             const dy = other.body.position.y - player.body.position.y;
-                            const distSq = dx * dx + dy * dy;
-                            if (distSq < minDistSq) {
-                                minDistSq = distSq;
+                            const dist = dx * dx + dy * dy;
+                            if (dist < minDist) {
+                                minDist = dist;
                                 nearestOpponent = other;
                             }
                         }

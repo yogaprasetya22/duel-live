@@ -1,18 +1,19 @@
+
 /**
- * BRUTAL SPATIAL HASH GRID
- * Optimized for: Zero GC, CPU Cache Friendliness, and 10k+ Entities.
+ * BRUTAL SPATIAL HASH
+ * Optimized for Zero-GC and CPU Cache Coherence.
  */
 export class SpatialHash {
-    private readonly cellSize: number;
-    private readonly cols: number;
-    private readonly rows: number;
-    private readonly totalCells: number;
+    private cellSize: number;
+    private cols: number;
+    private rows: number;
+    private totalCells: number;
 
-    // Buffer utama untuk menyimpan ID entitas secara linear
-    // Kita alokasikan 128 slot per sel (sesuaikan dengan densitas unit)
-    private readonly entityBuffer: Int32Array;
-    private readonly cellCounts: Uint32Array;
-    private readonly maxEntitiesPerCell: number = 128; 
+    // Buffer utama: [Cell0_Ent0, Cell0_Ent1, ..., Cell0_Ent127, Cell1_Ent0, ...]
+    // Kita kunci di 128 entitas per sel untuk optimasi bitwise (shift 7)
+    private entityBuffer: Uint32Array;
+    private cellCounts: Uint32Array;
+    private readonly strideShift = 7; // 2^7 = 128
 
     constructor(width: number, height: number, cellSize: number) {
         this.cellSize = cellSize;
@@ -20,24 +21,16 @@ export class SpatialHash {
         this.rows = Math.ceil(height / cellSize);
         this.totalCells = this.cols * this.rows;
 
-        // Flat buffer: [Cell0_Ent0, Cell0_Ent1, ..., Cell1_Ent0, ...]
-        this.entityBuffer = new Int32Array(this.totalCells * this.maxEntitiesPerCell);
+        this.entityBuffer = new Uint32Array(this.totalCells << this.strideShift);
         this.cellCounts = new Uint32Array(this.totalCells);
         
-        console.log(`[SpatialHash] Initialized: ${this.totalCells} cells (${this.cols}x${this.rows}), Buffer: ${(this.entityBuffer.byteLength / 1024 / 1024).toFixed(2)} MB`);
+        console.log(`[SpatialHash] Buffer Initialized: ${(this.entityBuffer.byteLength / 1024).toFixed(2)} KB`);
     }
 
-    /**
-     * Reset pointer sel tanpa menghapus isi buffer (O(C))
-     */
     public clear(): void {
         this.cellCounts.fill(0);
     }
 
-    /**
-     * Masukkan entitas ke dalam grid berdasarkan posisi.
-     * @param id Entity ID or Index
-     */
     public insert(id: number, x: number, y: number): void {
         const col = (x / this.cellSize) | 0;
         const row = (y / this.cellSize) | 0;
@@ -47,19 +40,14 @@ export class SpatialHash {
         const cellIndex = col + row * this.cols;
         const count = this.cellCounts[cellIndex];
 
-        if (count < this.maxEntitiesPerCell) {
-            // Kalkulasi offset manual: cellIndex * stride + currentCount
-            const offset = (cellIndex << 7) + count; // << 7 sama dengan * 128
+        if (count < 128) {
+            const offset = (cellIndex << this.strideShift) + count;
             this.entityBuffer[offset] = id;
             this.cellCounts[cellIndex]++;
         }
     }
 
-    /**
-     * Query entitas di sel sekitar.
-     * outResult harus berupa Array atau TypedArray yang sudah disediakan.
-     */
-    public query(x: number, y: number, radius: number, outResult: number[] | Int32Array): number {
+    public query(x: number, y: number, radius: number, outIds: Uint32Array): number {
         let found = 0;
         const xMin = ((x - radius) / this.cellSize) | 0;
         const xMax = ((x + radius) / this.cellSize) | 0;
@@ -75,11 +63,11 @@ export class SpatialHash {
 
                 const cellIndex = c + rowOffset;
                 const count = this.cellCounts[cellIndex];
-                const startOffset = cellIndex << 7;
+                const startOffset = cellIndex << this.strideShift;
 
                 for (let i = 0; i < count; i++) {
-                    outResult[found++] = this.entityBuffer[startOffset + i];
-                    if (found >= outResult.length) return found;
+                    outIds[found++] = this.entityBuffer[startOffset + i];
+                    if (found >= outIds.length) return found;
                 }
             }
         }

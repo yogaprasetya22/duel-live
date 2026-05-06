@@ -166,7 +166,9 @@ io.on("connection", (socket) => {
     });
 });
 
-const PORT = process.env.PORT || 3000;
-httpServer.listen(PORT, () => {
-    console.log(`TikTok-Game Server running on port ${PORT}`);
+// Bungkus process.env.PORT dengan Number()
+const PORT = Number(process.env.PORT) || 3000;
+
+httpServer.listen(PORT, "0.0.0.0", () => {
+    console.log(`TikTok-Game Server running on port ${PORT} (LAN Accessible)`);
 });

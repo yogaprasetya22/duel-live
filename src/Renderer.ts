@@ -2,9 +2,8 @@ import * as PIXI from "pixi.js";
 import type { Game } from "./Game";
 import { Player } from "./Player";
 import { query } from "bitecs";
-import { world, Position, ParticleState } from "./ECS";
+import { world, Position, ParticleState, PARTICLE_COLORS } from "./ECS";
 import { GAME_CONFIG } from "./Config";
-import { InstancedParticleRenderer } from "./InstancedParticleRenderer";
 
 // ─── Cached references per player view ───────────────────────────────────────
 // Storing direct object references eliminates ALL getChildByLabel() calls in the
@@ -29,7 +28,9 @@ interface PlayerViewCache {
 }
 
 // Pre-parsed color LUT: avoids parseInt + string replace every particle frame
-// (Particle colors are now handled by InstancedParticleRenderer)
+const PARTICLE_COLOR_LUT: number[] = PARTICLE_COLORS.map((c) =>
+    parseInt(c.replace("#", ""), 16),
+);
 
 export class Renderer {
     public app: PIXI.Application;
@@ -41,10 +42,16 @@ export class Renderer {
     private arenaGraphic: PIXI.Graphics;
     private hudGraphic: PIXI.Graphics;
     private fpsText: PIXI.BitmapText | null = null;
+    private leaderboardContainer: PIXI.Container;
+    private queueContainer: PIXI.Container;
+    private lbLines: PIXI.BitmapText[] = [];
+    private qLines: PIXI.BitmapText[] = [];
     private bgVideoSprite: PIXI.Sprite | null = null;
 
     // Particle system
-    private instancedParticleRenderer: InstancedParticleRenderer | null = null;
+    private particleContainer: PIXI.Container;
+    private particlePool: PIXI.Sprite[] = [];
+    private particleTexture: PIXI.Texture | null = null;
 
     // Texture cache
     private glowTexture: PIXI.Texture | null = null;
@@ -74,9 +81,11 @@ export class Renderer {
             ui: new PIXI.Container(),
         };
 
-        this.instancedParticleRenderer = new InstancedParticleRenderer(20000);
+        this.particleContainer = new PIXI.Container();
         this.arenaGraphic = new PIXI.Graphics();
         this.hudGraphic = new PIXI.Graphics();
+        this.leaderboardContainer = new PIXI.Container();
+        this.queueContainer = new PIXI.Container();
 
         this.ready = this.init(canvas);
         window.addEventListener("resize", () => this.onResize());
@@ -109,13 +118,17 @@ export class Renderer {
         this.app.stage.addChild(this.layers.ui);
 
         this.layers.grid.addChild(this.arenaGraphic);
-        if (this.instancedParticleRenderer) {
-            this.layers.particles.addChild(this.instancedParticleRenderer.displayObject);
-        }
+        this.layers.particles.addChild(this.particleContainer);
         this.layers.ui.addChild(this.hudGraphic);
+        this.layers.ui.addChild(this.leaderboardContainer);
+        this.layers.ui.addChild(this.queueContainer);
+
+        const pg = new PIXI.Graphics().circle(0, 0, GAME_CONFIG.PARTICLE_SIZE).fill(0xffffff);
+        this.particleTexture = this.app.renderer.generateTexture(pg);
+        pg.destroy();
 
         const gg = new PIXI.Graphics()
-            .circle(0, 0, 60)
+            .circle(0, 0, 50)
             .stroke({ color: 0xffffff, width: GAME_CONFIG.GLOW_STROKE });
         this.glowTexture = this.app.renderer.generateTexture(gg);
         gg.destroy();
@@ -168,6 +181,9 @@ export class Renderer {
         });
         this.fpsText.position.set(20, 20);
         this.layers.ui.addChild(this.fpsText);
+
+        // Pre-allocate Leaderboard & Queue Lines
+        this.setupHUDLayout();
 
         this.setupVideoBackground();
     }
@@ -230,6 +246,7 @@ export class Renderer {
         }
 
         this.updateParticles();
+        this.updateHUD(game);
         if (this.fpsText) this.fpsText.text = `FPS: ${game.fps}`;
     }
 
@@ -357,57 +374,150 @@ export class Renderer {
     }
 
     private updateSwords(cache: PlayerViewCache, player: Player) {
-        const knifeParts = player.knifeParts;
         const localPositions = player.knifeLocalPositions;
         const localAngles = player.knifeLocalAngles;
         const swordContainer = cache.swordContainer;
+        const maxSwords = GAME_CONFIG.MAX_SWORDS;
 
-        // Add sprites only when swordCount increases (rare event)
-        while (cache.swordSprites.length < knifeParts.length) {
+        // Pre-allocate sprites up to MAX_SWORDS once
+        while (cache.swordSprites.length < maxSwords) {
             if (player.knifeImg) {
-                const sprite = new PIXI.Sprite(
-                    PIXI.Texture.from(player.knifeImg),
-                );
+                const sprite = new PIXI.Sprite(PIXI.Texture.from(player.knifeImg));
                 sprite.anchor.set(0.5);
                 swordContainer.addChild(sprite);
                 cache.swordSprites.push(sprite);
             } else break;
         }
 
-        // Remove if count ever decreases
-        while (cache.swordSprites.length > knifeParts.length) {
-            const s = cache.swordSprites.pop()!;
-            swordContainer.removeChild(s);
-            s.destroy();
-        }
-
         const targetH = GAME_CONFIG.KNIFE_HEIGHT * (player.radius / GAME_CONFIG.PLAYER_RADIUS);
-        const radiusChanged =
-            cache.lastSwordCount !== knifeParts.length ||
-            cache.lastMaskRadius !== player.radius;
+        const radiusChanged = cache.lastMaskRadius !== player.radius;
 
-        for (let i = 0; i < knifeParts.length; i++) {
+        for (let i = 0; i < maxSwords; i++) {
             const sprite = cache.swordSprites[i];
-            sprite.position.set(localPositions[i].x, localPositions[i].y);
-            sprite.rotation = localAngles[i];
+            if (!sprite) continue;
 
-            // Height/scale update only needed when radius changes
-            if (radiusChanged) {
-                sprite.height = targetH;
-                sprite.scale.x = sprite.scale.y;
+            // Visibility based on current active swords
+            const isActive = i < player.swordCount;
+            sprite.visible = isActive;
+
+            if (isActive) {
+                sprite.position.set(localPositions[i].x, localPositions[i].y);
+                sprite.rotation = localAngles[i];
+
+                if (radiusChanged) {
+                    sprite.height = targetH;
+                    sprite.scale.x = sprite.scale.y;
+                }
             }
         }
 
         if (radiusChanged) {
-            cache.lastSwordCount = knifeParts.length;
             cache.lastMaskRadius = player.radius;
         }
     }
 
     private updateParticles() {
-        if (!this.instancedParticleRenderer) return;
         const ents = query(world, [Position, ParticleState]);
-        this.instancedParticleRenderer.update(ents);
+        const count = ents.length;
+
+        while (this.particlePool.length < count) {
+            const s = new PIXI.Sprite(this.particleTexture!);
+            s.anchor.set(0.5);
+            this.particleContainer.addChild(s);
+            this.particlePool.push(s);
+        }
+
+        for (let i = 0; i < this.particlePool.length; i++) {
+            const s = this.particlePool[i];
+            if (i < count) {
+                const eid = ents[i];
+                s.visible = true;
+                s.position.set(Position.x[eid], Position.y[eid]);
+                const life = ParticleState.life[eid];
+                s.alpha = life / ParticleState.maxLife[eid]; // Math.max(0,…) unnecessary: life >= 0 by design
+                // Use pre-parsed LUT instead of parseInt + replace every frame
+                s.tint =
+                    PARTICLE_COLOR_LUT[ParticleState.colorId[eid]] ?? 0xffffff;
+            } else {
+                s.visible = false;
+            }
+        }
+    }
+
+    private setupHUDLayout() {
+        const margin = 20;
+        
+        // Leaderboard (Top Right)
+        this.leaderboardContainer.x = window.innerWidth - 300;
+        this.leaderboardContainer.y = margin;
+        
+        const lbTitle = new PIXI.BitmapText({
+            text: "TOP WARRIORS",
+            style: { fontFamily: "OrbitronHUD", fontSize: 24, fill: 0xffcc00 }
+        });
+        this.leaderboardContainer.addChild(lbTitle);
+
+        for (let i = 0; i < 5; i++) {
+            const line = new PIXI.BitmapText({
+                text: "",
+                style: { fontFamily: "OrbitronHUD", fontSize: 18 }
+            });
+            line.y = 40 + i * 25;
+            this.lbLines.push(line);
+            this.leaderboardContainer.addChild(line);
+        }
+
+        // Queue (Bottom Left)
+        this.queueContainer.x = margin;
+        this.queueContainer.y = window.innerHeight - 180;
+
+        const qTitle = new PIXI.BitmapText({
+            text: "WAITING LIST",
+            style: { fontFamily: "OrbitronHUD", fontSize: 20, fill: 0x00e5ff }
+        });
+        this.queueContainer.addChild(qTitle);
+
+        for (let i = 0; i < 5; i++) {
+            const line = new PIXI.BitmapText({
+                text: "",
+                style: { fontFamily: "OrbitronHUD", fontSize: 16 }
+            });
+            line.y = 30 + i * 22;
+            this.qLines.push(line);
+            this.queueContainer.addChild(line);
+        }
+    }
+
+    public updateHUD(game: Game) {
+        // Update Leaderboard
+        const topPlayers = [...game.players].sort((a, b) => b.hp - a.hp).slice(0, 5);
+        for (let i = 0; i < 5; i++) {
+            const line = this.lbLines[i];
+            const p = topPlayers[i];
+            if (p) {
+                line.text = `${i + 1}. ${p.id.toUpperCase()} - HP:${Math.ceil(p.hp)}`;
+                line.visible = true;
+            } else {
+                line.visible = false;
+            }
+        }
+
+        // Update Queue
+        const q = game.queue;
+        for (let i = 0; i < 5; i++) {
+            const line = this.qLines[i];
+            const entry = q[i];
+            if (entry) {
+                line.text = `NEXT: ${entry.name.toUpperCase()}`;
+                line.visible = true;
+            } else {
+                line.visible = false;
+            }
+        }
+
+        // Auto-reposition on window size change (lazy check)
+        this.leaderboardContainer.x = window.innerWidth - 300;
+        this.queueContainer.y = window.innerHeight - 180;
     }
 
     public drawArena(x: number, y: number, w: number, h: number) {
