@@ -3,15 +3,25 @@ import { io } from 'socket.io-client';
 
 const canvas = document.getElementById('game') as HTMLCanvasElement;
 const connectBtn = document.getElementById('connect-btn') as HTMLButtonElement;
+const testBtn = document.getElementById('test-btn') as HTMLButtonElement;
 const usernameInput = document.getElementById('username') as HTMLInputElement;
 const statusText = document.getElementById('status') as HTMLSpanElement;
+const statusDot = document.getElementById('status-dot') as HTMLDivElement;
 const connectorDiv = document.getElementById('connector') as HTMLDivElement;
 const closeBtn = document.getElementById('close-btn') as HTMLButtonElement;
 
 if (canvas) {
   closeBtn?.addEventListener('click', () => {
-    connectorDiv.style.display = 'none';
+    connectorDiv.classList.add('hidden');
   });
+
+  // Re-show panel on key press (e.g. Escape)
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      connectorDiv.classList.toggle('hidden');
+    }
+  });
+
   canvas.width = window.innerWidth;
   canvas.height = window.innerHeight;
 
@@ -19,26 +29,35 @@ if (canvas) {
 
   const socket = io('http://localhost:3000');
 
-  connectBtn.addEventListener('click', () => {
-    game.reset(); // Clear everything for a fresh start
+  const initiateConnection = (username: string) => {
+    if (!username) return;
+    game.reset(); 
     game.startMusic();
-    const user = usernameInput.value.trim();
-    if (user) {
-      statusText.innerText = 'Connecting...';
-      socket.emit('join-tiktok', user);
-    }
+    statusText.innerText = 'Connecting...';
+    socket.emit('join-tiktok', username);
+  };
+
+  connectBtn.addEventListener('click', () => {
+    initiateConnection(usernameInput.value.trim());
+  });
+
+  testBtn?.addEventListener('click', () => {
+    initiateConnection('TEST');
   });
 
   socket.on('tiktok-status', (data) => {
     if (data.connected) {
       statusText.innerText = 'Connected to Live!';
       statusText.style.color = '#00ff41';
+      statusDot.classList.add('online');
+      
       setTimeout(() => {
-        connectorDiv.style.display = 'none';
+        connectorDiv.classList.add('hidden');
       }, 2000);
     } else {
       statusText.innerText = 'Failed: ' + (data.error || 'Unknown error');
       statusText.style.color = '#ff4444';
+      statusDot.classList.remove('online');
     }
   });
 
@@ -46,4 +65,5 @@ if (canvas) {
   socket.on('tiktok-chat', (data) => game.onTikTokChat(data));
   socket.on('tiktok-gift', (data) => game.onTikTokGift(data));
   socket.on('tiktok-like', (data) => game.onTikTokLike(data));
+  socket.on('tiktok-member', (data) => game.onTikTokMember(data));
 }

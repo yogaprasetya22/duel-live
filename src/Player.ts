@@ -4,11 +4,11 @@ import { GAME_CONFIG } from './Config';
 const { Bodies, World, Body } = Matter;
 
 const CIRCLE_OPTIONS = {
-  restitution: 1.1, // High bounciness as requested
-  friction: 0.1,
-  frictionAir: 0.05, // Increased to 0.05 to heavily dampen brutal horizontal movement
-  frictionStatic: 0.1,
-  density: 0.005,
+  restitution: 1.2, // Extremely bouncy
+  friction: 0.05,
+  frictionAir: 0.08, // Very high damping for "smooth/slow" feel
+  frictionStatic: 0.05,
+  density: 0.01,    // Higher density to feel more solid
   label: 'player',
 };
 
@@ -16,11 +16,13 @@ export class Player {
   world: Matter.World;
   id: string;
   radius: number;
-  hp: number = 10;
+  hp: number = 50;
   isDead: boolean = false;
   hitCooldown: number = 0;
   isHit: boolean = false;
-  hitTimer: number = 0;
+  hitFlashTimer: number = 0;
+  healFlashTimer: number = 0;
+  hitsDealt: number = 0;
   avatarImg: HTMLImageElement | null;
   knifeImg: HTMLImageElement | null;
   tiktokProfileImg: HTMLImageElement | null = null;
@@ -29,9 +31,13 @@ export class Player {
   body: Matter.Body;
   behaviorTimer: number = 0;
   trail: { x: number, y: number }[] = [];
+  swordTrails: { x: number, y: number }[][] = [];
   maxTrailLength: number = GAME_CONFIG.MAX_TRAIL_LENGTH;
   swordCount: number = 1;
   category: number;
+  knifeParts: Matter.Body[] = [];
+  knifeLocalPositions: {x: number, y: number}[] = [];
+  knifeLocalAngles: number[] = [];
 
   constructor(
     world: Matter.World,
@@ -65,13 +71,14 @@ export class Player {
     });
     (circlePart as any).playerId = this.id;
 
-    const knifeWidth = 12;
-    const knifeHeight = 55;
+    // Scale knife based on current radius (baseline radius is 35)
+    const scaleFactor = this.radius / 35;
+    const knifeWidth = 12 * scaleFactor;
+    const knifeHeight = 65 * scaleFactor; 
     const parts = [circlePart];
 
     for (let i = 0; i < this.swordCount; i++) {
       // Calculate angle for each sword (evenly spaced)
-      // Start from bottom (Math.PI / 2)
       const angle = (Math.PI / 2) + (i * (Math.PI * 2 / this.swordCount));
       const dist = this.radius + knifeHeight / 2;
       
@@ -85,6 +92,9 @@ export class Player {
       });
       (knifePart as any).playerId = this.id;
       parts.push(knifePart);
+      this.knifeParts.push(knifePart);
+      this.knifeLocalPositions.push({ x: kx - x, y: ky - y });
+      this.knifeLocalAngles.push(angle + Math.PI / 2);
     }
 
     return Body.create({
@@ -96,7 +106,16 @@ export class Player {
 
   addSword() {
     this.swordCount++;
-    
+    this.recreateBody();
+  }
+
+  grow(factor: number) {
+    this.radius *= factor;
+    this.knifeOffsetDistance *= factor;
+    this.recreateBody();
+  }
+
+  recreateBody() {
     // Recreate body with same state
     const oldPos = { ...this.body.position };
     const oldVel = { ...this.body.velocity };
@@ -137,7 +156,7 @@ export class Player {
     this.hp -= 1;
     this.hitCooldown = GAME_CONFIG.HIT_COOLDOWN;
     this.isHit = true;
-    this.hitTimer = GAME_CONFIG.HIT_FLASH_DURATION;
+    this.hitFlashTimer = GAME_CONFIG.HIT_FLASH_DURATION;
 
     if (this.hp <= 0) {
       this.hp = 0;
@@ -147,11 +166,28 @@ export class Player {
     return true;
   }
 
+  heal(amount: number) {
+    this.hp += amount;
+    this.healFlashTimer = 300; // 300ms green flash
+  }
+
+  onHitDealt() {
+    this.hitsDealt++;
+    if (this.hitsDealt >= 2) {
+      this.heal(1);
+      this.hitsDealt = 0;
+    }
+  }
+
   update(delta: number, opponentBody?: Matter.Body) {
     if (this.hitCooldown > 0) this.hitCooldown -= delta;
-    if (this.hitTimer > 0) {
-      this.hitTimer -= delta;
-      if (this.hitTimer <= 0) this.isHit = false;
+    if (this.hitFlashTimer > 0) {
+      this.hitFlashTimer -= delta;
+      if (this.hitFlashTimer <= 0) this.isHit = false;
+    }
+
+    if (this.healFlashTimer > 0) {
+      this.healFlashTimer -= delta;
     }
 
     this.behaviorTimer += delta;
@@ -203,17 +239,35 @@ export class Player {
       });
     }
 
-    const knifePart = this.body.parts[2];
-    const kx = knifePart.position.x;
-    const ky = knifePart.position.y;
-    const ka = this.body.angle;
-    const tipX = kx + Math.cos(ka + Math.PI / 2) * 25;
-    const tipY = ky + Math.sin(ka + Math.PI / 2) * 25;
+    // ── Update Sword Trails (Wind Effect) ──
+    const knifeParts = this.body.parts.filter(p => p.label === 'player-knife');
     
-    this.trail.push({ x: tipX, y: tipY });
-    if (this.trail.length > this.maxTrailLength) {
-      this.trail.shift();
+    // Ensure we have an array of trails for each knife
+    if (this.swordTrails.length !== knifeParts.length) {
+      this.swordTrails = knifeParts.map(() => []);
     }
+
+    knifeParts.forEach((kPart, i) => {
+      // Calculate tip of the sword by finding the vertices furthest from center
+      const cx = this.body.position.x;
+      const cy = this.body.position.y;
+      
+      // Sort vertices by distance to player center
+      const sortedVerts = [...kPart.vertices].sort((a, b) => {
+        const distA = (a.x - cx)**2 + (a.y - cy)**2;
+        const distB = (b.x - cx)**2 + (b.y - cy)**2;
+        return distB - distA; // Descending
+      });
+      
+      // Average the two furthest vertices to get the tip midpoint
+      const tipX = (sortedVerts[0].x + sortedVerts[1].x) / 2;
+      const tipY = (sortedVerts[0].y + sortedVerts[1].y) / 2;
+      
+      this.swordTrails[i].push({ x: tipX, y: tipY });
+      if (this.swordTrails[i].length > GAME_CONFIG.SWORD_TRAIL_LENGTH) {
+        this.swordTrails[i].shift();
+      }
+    });
   }
 
   destroy() {

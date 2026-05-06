@@ -3,9 +3,9 @@ import { createPhysicsWorld } from './Physics';
 import { createArena } from './Arena';
 import { Player } from './Player';
 import { Renderer } from './Renderer';
-import { Particle } from './Particle';
 import { GAME_CONFIG } from './Config';
-
+import { world, Position, Velocity, ParticleState, createParticle } from './ECS';
+import { query, removeEntity } from 'bitecs';
 const { Engine, Events, Body, World } = Matter;
 
 export class Game {
@@ -26,10 +26,12 @@ export class Game {
   victoryTimer: number = GAME_CONFIG.VICTORY_TIMER;
   restartTimer: number = 10000; // 10 seconds to restart
   knifeImg: HTMLImageElement | null = null;
-  swordSfx: HTMLAudioElement | null = null;
+  bgImg: HTMLImageElement | null = null;
   avatarImgs: HTMLImageElement[] = [];
   tiktokUsers: Map<string, Player> = new Map();
-  particles: Particle[] = [];
+  activeMembers: Set<string> = new Set(); // Track users who joined the room
+  userData: Map<string, any> = new Map(); // Store profile pictures for auto-respawn
+  pendingSpawns: Set<string> = new Set(); // Prevent duplicate spawn calls
   shakeAmount: number = 0;
   queue: { avatarUrl: string, name: string }[] = [];
   respawnCooldowns: Map<string, number> = new Map();
@@ -39,6 +41,9 @@ export class Game {
   currentBgmIndex: number = 0;
   bgmAudio: HTMLAudioElement | null = null;
   lastSfxTime: number = 0;
+  fps: number = 0;
+  private frameCount_fps: number = 0;
+  private lastFpsUpdate: number = 0;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -50,14 +55,16 @@ export class Game {
 
     this.initArena();
 
-    this.loadAssets().then(({ avatarImgs, knifeImg, swordSfx }) => {
+    Promise.all([
+      this.loadAssets(),
+      this.renderer.ready
+    ]).then(([{ avatarImgs, knifeImg }]) => {
       this.assetsLoaded = true;
       this.avatarImgs = avatarImgs;
       this.knifeImg = knifeImg;
-      this.swordSfx = swordSfx;
-      
+      this.lastTime = performance.now();
       this.setupCollisionEvents();
-      this.start();
+      requestAnimationFrame((t) => this.loop(t));
     });
   }
 
@@ -145,10 +152,7 @@ export class Game {
       this.loadImage('/p5.png'),
     ]);
 
-    const swordSfx = new Audio('/sword.mp3');
-    swordSfx.load();
-
-    return { avatarImgs, knifeImg, swordSfx };
+    return { avatarImgs, knifeImg };
   }
 
   // ── TIKTOK HANDLERS ──
@@ -171,6 +175,17 @@ export class Game {
     }
   }
 
+  onTikTokMember(data: any) {
+    const userId = data.uniqueId;
+    this.activeMembers.add(userId);
+    this.userData.set(userId, data); // Store data for re-spawning
+
+    const player = this.tiktokUsers.get(userId);
+    if (!player || player.isDead) {
+      this.spawnNewPlayer(data.profilePictureUrl, userId);
+    }
+  }
+
   onTikTokGift(data: any) {
     const userId = data.uniqueId;
     let player = this.tiktokUsers.get(userId);
@@ -184,16 +199,28 @@ export class Game {
     }
 
     if (player && !player.isDead) {
-      // Gift 1 coin = +10 HP
+      // Gift 1 coin = +50 HP
       const diamonds = data.diamondCount || 1;
-      player.hp += diamonds * 10;
+      player.hp += diamonds * 50;
       
+      // Grow size: 2% per diamond
+      player.grow(1 + (0.02 * diamonds));
+
       // Also add a sword for any gift
       player.addSword();
     }
   }
 
-  onTikTokLike(_data: any) {
+  onTikTokLike(data: any) {
+    const userId = data.uniqueId;
+    const player = this.tiktokUsers.get(userId);
+    
+    if (!player || player.isDead) {
+      // Auto-spawn on like too! (For better accuracy)
+      const profilePic = data.profilePictureUrl || `https://api.dicebear.com/7.x/pixel-art/svg?seed=${userId}`;
+      this.spawnNewPlayer(profilePic, userId);
+    }
+
     this.players.forEach(p => {
       if (!p.isDead) {
         const vel = p.body.velocity;
@@ -206,7 +233,10 @@ export class Game {
   }
 
   async spawnNewPlayer(avatarUrl: string, name: string) {
+    if (this.pendingSpawns.has(name)) return;
     if (this.tiktokUsers.has(name) && !this.tiktokUsers.get(name)?.isDead) return;
+
+    this.pendingSpawns.add(name);
 
     const img = new Image();
     img.crossOrigin = "anonymous";
@@ -238,6 +268,7 @@ export class Game {
     newPlayer.applyInitialImpulse();
     this.players.push(newPlayer);
     this.tiktokUsers.set(name, newPlayer);
+    this.pendingSpawns.delete(name);
   }
 
   setupCollisionEvents() {
@@ -263,17 +294,18 @@ export class Game {
         const bIsBody = bodyB.label === 'player-body';
 
         if (aIsKnife && bIsBody && pB) {
-          pB.takeDamage();
+          if (pB.takeDamage() && pA) {
+            pA.onHitDealt();
+          }
           this.playHitSfx();
-          this.createHitEffect(pair.collision.supports[0]?.x || parentB.position.x, pair.collision.supports[0]?.y || parentB.position.y, '#FF1744');
+          this.createHitEffect(pair.collision.supports[0]?.x || parentB.position.x, pair.collision.supports[0]?.y || parentB.position.y, 0); 
         } else if (bIsKnife && aIsBody && pA) {
-          pA.takeDamage();
+          if (pA.takeDamage() && pB) {
+            pB.onHitDealt();
+          }
           this.playHitSfx();
-          this.createHitEffect(pair.collision.supports[0]?.x || parentA.position.x, pair.collision.supports[0]?.y || parentA.position.y, '#FF1744');
+          this.createHitEffect(pair.collision.supports[0]?.x || parentA.position.x, pair.collision.supports[0]?.y || parentA.position.y, 0); 
         }
-
-        // Removed applyKnockback. Matter.js natively handles bounces perfectly with restitution=1.1.
-        // Adding artificial force caused chaotic/brutal movements when crowded.
       }
     });
   }
@@ -288,13 +320,6 @@ export class Game {
       };
     }
     
-    if (this.swordSfx) {
-      this.swordSfx.play().then(() => {
-        this.swordSfx?.pause();
-        this.swordSfx!.currentTime = 0;
-      }).catch(() => {});
-    }
-
     this.playNextBgm();
   }
 
@@ -313,6 +338,8 @@ export class Game {
   }
 
   playHitSfx() {
+    // Sound disabled to prevent noise in high-density combat
+    /*
     const now = performance.now();
     if (now - this.lastSfxTime < 45) return; 
     this.lastSfxTime = now;
@@ -322,6 +349,7 @@ export class Game {
       sfx.volume = 0.4 + Math.random() * 0.4; 
       sfx.play().catch(() => {});
     }
+    */
   }
 
   applyKnockback(pair: Matter.Pair, parentA: Matter.Body, parentB: Matter.Body) {
@@ -344,24 +372,22 @@ export class Game {
   }
 
   reset() {
-    // Clear all players from physics world
     this.players.forEach(p => p.destroy());
     this.players = [];
     this.tiktokUsers.clear();
-    this.queue = []; // Clear queue
-    this.respawnCooldowns.clear(); // Clear all respawn cooldowns
-    this.particles = [];
+    this.activeMembers.clear();
+    this.userData.clear();
+    this.queue = []; 
+    this.respawnCooldowns.clear(); 
     this.shakeAmount = 0;
     this.victoryTimer = GAME_CONFIG.VICTORY_TIMER;
     this.restartTimer = 10000;
     this.state = 'playing';
     this.winner = null;
     
-    // Clear obstacles and recreate arena
     this.obstacles.forEach(o => World.remove(this.world, o));
     this.initArena();
 
-    // Start loop again if it was stopped
     this.lastTime = performance.now();
     requestAnimationFrame((t) => this.loop(t));
   }
@@ -370,21 +396,45 @@ export class Game {
     const delta = timestamp - this.lastTime;
     this.lastTime = timestamp;
 
+    this.frameCount_fps++;
+    if (timestamp - this.lastFpsUpdate >= 1000) {
+      this.fps = this.frameCount_fps;
+      this.frameCount_fps = 0;
+      this.lastFpsUpdate = timestamp;
+    }
+
     if (this.state === 'gameover') {
       this.restartTimer -= delta;
       if (this.restartTimer <= 0) {
         this.reset();
-        return; // Exit current loop, reset() starts a new one
+        return; 
       }
     } else {
       Engine.update(this.engine, 1000 / 60);
 
       const deadPlayers = this.players.filter(p => p.isDead);
       if (deadPlayers.length > 0) {
-        deadPlayers.forEach(p => {
-          p.destroy();
-          this.tiktokUsers.delete(p.id);
-          this.respawnCooldowns.set(p.id, Date.now() + GAME_CONFIG.RESPAWN_COOLDOWN);
+        deadPlayers.forEach(player => {
+          player.destroy();
+          this.tiktokUsers.delete(player.id);
+          this.respawnCooldowns.set(player.id, Date.now() + GAME_CONFIG.RESPAWN_COOLDOWN);
+          // Clear sword trails for dead players
+          player.swordTrails.forEach(t => t.length = 0);
+          
+          // AUTO-RESPAWN logic
+          if (this.activeMembers.has(player.id)) {
+            const data = this.userData.get(player.id);
+            if (data) {
+              // Respawn after a short delay (e.g. 1 second)
+              setTimeout(() => {
+                const stillActive = this.activeMembers.has(player.id);
+                const isStillDead = !this.tiktokUsers.get(player.id) || this.tiktokUsers.get(player.id)!.isDead;
+                if (stillActive && isStillDead) {
+                  this.spawnNewPlayer(data.profilePictureUrl, player.id);
+                }
+              }, 1000);
+            }
+          }
         });
         this.players = this.players.filter(p => !p.isDead);
       }
@@ -394,25 +444,62 @@ export class Game {
         if (next) this.spawnNewPlayer(next.avatarUrl, next.name);
       }
 
+      const ents = query(world, [Position, Velocity, ParticleState]);
+      for (let i = 0; i < ents.length; i++) {
+        const eid = ents[i];
+        
+        Position.x[eid] += Velocity.x[eid];
+        Position.y[eid] += Velocity.y[eid];
+        Velocity.y[eid] += 0.2; 
+        
+        ParticleState.life[eid] -= 0.02; 
+        
+        if (ParticleState.life[eid] <= 0) {
+          removeEntity(world, eid);
+        }
+      }
+
       const alivePlayers = this.players.filter(p => !p.isDead);
-      const frameCount = Math.floor(timestamp / 16); 
+      const frameCount = Math.floor(timestamp / 16);
+
+      // ── SPATIAL GRID FOR AI OPTIMIZATION ──
+      const grid: Map<string, Player[]> = new Map();
+      const cellSize = 150;
+      for (let i = 0; i < alivePlayers.length; i++) {
+        const p = alivePlayers[i];
+        const gx = Math.floor(p.body.position.x / cellSize);
+        const gy = Math.floor(p.body.position.y / cellSize);
+        const key = `${gx},${gy}`;
+        if (!grid.has(key)) grid.set(key, []);
+        grid.get(key)!.push(p);
+      }
 
       for (let i = 0; i < alivePlayers.length; i++) {
         const player = alivePlayers[i];
         
-        // AI Optimization: Run heavy search only every 10 frames
         let nearestOpponent: Player | null = null;
-        if ((frameCount + i) % 10 === 0) {
+        if ((frameCount + i) % 30 === 0) {
           let minDist = Infinity;
-          for (let j = 0; j < alivePlayers.length; j++) {
-            if (i === j) continue;
-            const other = alivePlayers[j];
-            const dx = other.body.position.x - player.body.position.x;
-            const dy = other.body.position.y - player.body.position.y;
-            const dist = dx * dx + dy * dy;
-            if (dist < minDist) {
-              minDist = dist;
-              nearestOpponent = other;
+          const gx = Math.floor(player.body.position.x / cellSize);
+          const gy = Math.floor(player.body.position.y / cellSize);
+
+          // Check 3x3 cells around player
+          for (let ox = -1; ox <= 1; ox++) {
+            for (let oy = -1; oy <= 1; oy++) {
+              const key = `${gx + ox},${gy + oy}`;
+              const cell = grid.get(key);
+              if (!cell) continue;
+
+              for (const other of cell) {
+                if (other === player) continue;
+                const dx = other.body.position.x - player.body.position.x;
+                const dy = other.body.position.y - player.body.position.y;
+                const dist = dx * dx + dy * dy;
+                if (dist < minDist) {
+                  minDist = dist;
+                  nearestOpponent = other;
+                }
+              }
             }
           }
           (player as any).lastTarget = nearestOpponent;
@@ -450,8 +537,6 @@ export class Game {
       }
     }
 
-    this.particles = this.particles.filter(p => p.life > 0);
-    this.particles.forEach(p => p.update());
     this.shakeAmount *= 0.9;
     if (this.shakeAmount < 0.1) this.shakeAmount = 0;
     
@@ -461,59 +546,14 @@ export class Game {
 
   render() {
     if (!this.assetsLoaded) return;
-    const ctx = this.renderer.ctx;
-    ctx.save();
-    if (this.shakeAmount > 0) {
-      ctx.translate((Math.random() - 0.5) * this.shakeAmount, (Math.random() - 0.5) * this.shakeAmount);
-    }
-    this.renderer.clear();
-    this.renderer.drawArena(this.arenaX, this.arenaY, this.arenaW, this.arenaH);
-    for (const obstacle of this.obstacles) this.renderer.drawObstacle(obstacle);
-    for (const player of this.players) if (!player.isDead) this.renderer.drawPlayer(player);
-    for (const p of this.particles) p.draw(ctx);
-    ctx.restore();
-    this.renderHUD();
+    this.renderer.render(this);
   }
 
-  createHitEffect(x: number, y: number, color: string) {
+  createHitEffect(x: number, y: number, colorId: number = 0) {
     this.shakeAmount = GAME_CONFIG.SHAKE_INTENSITY;
-    // FPS Optimization: Cap particles and reduce count per hit
-    if (this.particles.length > 50) return; 
-    for (let i = 0; i < 5; i++) { // Reduced from 15 to 5
-      this.particles.push(new Particle(x, y, color));
-    }
-  }
-
-  renderHUD() {
-    const ctx = this.renderer.ctx;
-    const w = this.canvas.width;
-    if (this.queue.length > 0) {
-      ctx.font = '14px Arial';
-      ctx.fillStyle = '#FFD600';
-      ctx.textAlign = 'center';
-      ctx.fillText(`QUEUE: ${this.queue.length} WAITING`, w / 2, 45);
-    }
-    const aliveCount = this.players.filter(p => !p.isDead).length;
-    if (this.state === 'playing' && aliveCount === 1 && this.players.length > 1) {
-      ctx.font = 'bold 32px Arial';
-      ctx.fillStyle = '#FFD600';
-      ctx.textAlign = 'center';
-      ctx.fillText(`VICTORY IN: ${(this.victoryTimer / 1000).toFixed(1)}s`, w / 2, this.canvas.height / 2);
-    }
-    if (this.state === 'gameover') {
-      ctx.font = 'bold 48px Arial';
-      ctx.fillStyle = 'white';
-      ctx.textAlign = 'center';
-      ctx.shadowColor = 'black';
-      ctx.shadowBlur = 10;
-      ctx.fillText('GAME WINNER', w / 2, this.canvas.height / 2);
-      ctx.font = 'bold 24px Arial';
-      ctx.fillText(`WINNER: ${this.winner?.toUpperCase()}`, w / 2, this.canvas.height / 2 + 50);
-      
-      ctx.font = '18px Arial';
-      ctx.fillStyle = '#00FF41';
-      ctx.fillText(`RESTARTING IN: ${(this.restartTimer / 1000).toFixed(1)}s`, w / 2, this.canvas.height / 2 + 100);
-      ctx.shadowBlur = 0;
+    // ECS particles are extremely fast, we can safely spawn more without FPS drop
+    for (let i = 0; i < 4; i++) { 
+      createParticle(x, y, colorId);
     }
   }
 

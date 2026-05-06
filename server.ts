@@ -1,16 +1,15 @@
 import express from "express";
 import { createServer } from "http";
 import { Server } from "socket.io";
-import cors from "cors";
 import { WebcastPushConnection } from "tiktok-live-connector";
-import dotenv from "dotenv";
-
-dotenv.config();
+import path from "path";
 
 const app = express();
-app.use(cors());
-
 const httpServer = createServer(app);
+
+// Serve static files from the 'dist' directory
+app.use(express.static(path.join(__dirname, "dist")));
+
 const io = new Server(httpServer, {
     cors: {
         origin: "*",
@@ -26,10 +25,58 @@ io.on("connection", (socket) => {
     socket.on("join-tiktok", (username: string) => {
         console.log(`Request to join TikTok: ${username}`);
 
+        // Cleanup previous connection if any
         if (tiktokConnection) {
             tiktokConnection.disconnect();
+            tiktokConnection = null;
         }
 
+        // ── TESTING MODE ──
+        if (username.toUpperCase() === "TEST") {
+            console.log("Entering TESTING MODE...");
+            socket.emit("tiktok-status", { connected: true, roomId: "TEST_ROOM" });
+
+            const testInterval = setInterval(() => {
+                const dummyId = `bot_${Math.floor(Math.random() * 50)}`;
+                const isGift = Math.random() > 0.7;
+
+                if (isGift) {
+                    const diamonds = Math.floor(Math.random() * 5) + 1;
+                    io.emit("tiktok-gift", {
+                        uniqueId: dummyId,
+                        giftName: "Rose",
+                        repeatCount: 1,
+                        diamondCount: diamonds,
+                        profilePictureUrl: `https://api.dicebear.com/7.x/pixel-art/svg?seed=${dummyId}`,
+                    });
+                } else {
+                    io.emit("tiktok-chat", {
+                        uniqueId: dummyId,
+                        comment: "CYBERPUNK BATTLE!",
+                        nickname: `Bot ${dummyId}`,
+                        profilePictureUrl: `https://api.dicebear.com/7.x/pixel-art/svg?seed=${dummyId}`,
+                    });
+                }
+
+                // Simulate member join periodically
+                if (Math.random() > 0.8) {
+                    const newBotId = `bot_${Math.floor(Math.random() * 50 + 50)}`;
+                    io.emit("tiktok-member", {
+                        uniqueId: newBotId,
+                        nickname: `Bot ${newBotId}`,
+                        profilePictureUrl: `https://api.dicebear.com/7.x/pixel-art/svg?seed=${newBotId}`,
+                    });
+                }
+            }, 600); // More frequent updates
+
+            socket.on("disconnect", () => {
+                clearInterval(testInterval);
+                console.log("Testing Mode stopped.");
+            });
+            return;
+        }
+
+        // ── PRODUCTION MODE ──
         tiktokConnection = new WebcastPushConnection(username);
 
         tiktokConnection
@@ -86,6 +133,14 @@ io.on("connection", (socket) => {
         tiktokConnection.on("share", (data) => {
             io.emit("tiktok-share", {
                 uniqueId: data.uniqueId,
+            });
+        });
+
+        tiktokConnection.on("member", (data) => {
+            io.emit("tiktok-member", {
+                uniqueId: data.uniqueId,
+                nickname: data.nickname,
+                profilePictureUrl: data.profilePictureUrl,
             });
         });
     });
