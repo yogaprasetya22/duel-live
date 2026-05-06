@@ -10,12 +10,17 @@
     "preview": "vite preview"
   },
   "devDependencies": {
+    "@rollup/plugin-virtual": "^3.0.2",
     "@types/matter-js": "^0.20.2",
     "concurrently": "^9.2.1",
+    "rollup": "^4.60.3",
     "typescript": "~6.0.2",
-    "vite": "^8.0.10"
+    "vite": "^8.0.10",
+    "vite-plugin-top-level-await": "^1.6.0",
+    "vite-plugin-wasm": "^3.6.0"
   },
   "dependencies": {
+    "@dimforge/rapier2d-compat": "^0.19.3",
     "@types/cors": "^2.8.19",
     "@types/dotenv": "^8.2.3",
     "@types/express": "^5.0.6",

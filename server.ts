@@ -145,12 +145,21 @@ io.on("connection", (socket) => {
         });
     });
 
+    socket.on("leave-tiktok", () => {
+        console.log("Request to leave TikTok connection");
+        if (tiktokConnection) {
+            tiktokConnection.disconnect();
+            tiktokConnection = null;
+        }
+        socket.emit("tiktok-status", { connected: false });
+    });
+
     socket.on("disconnect", () => {
         console.log("Client disconnected:", socket.id);
         
         // If this socket started the tiktok connection, clean it up
         if (tiktokConnection) {
-            console.log("Stopping TikTok connection due to client disconnect...");
+            console.log("Cleaning up TikTok connection on disconnect...");
             tiktokConnection.disconnect();
             tiktokConnection = null;
         }
