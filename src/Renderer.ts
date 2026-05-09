@@ -46,7 +46,6 @@ export class Renderer {
     private queueContainer: PIXI.Container;
     private lbLines: PIXI.BitmapText[] = [];
     private qLines: PIXI.BitmapText[] = [];
-    private bgVideoSprite: PIXI.Sprite | null = null;
 
     // Particle system
     private particleContainer: PIXI.Container;
@@ -94,10 +93,6 @@ export class Renderer {
     private onResize() {
         if (!this.app.renderer) return;
         this.app.renderer.resize(window.innerWidth, window.innerHeight);
-        if (this.bgVideoSprite) {
-            this.bgVideoSprite.width = this.app.screen.width;
-            this.bgVideoSprite.height = this.app.screen.height;
-        }
     }
 
     private async init(canvas: HTMLCanvasElement) {
@@ -185,27 +180,16 @@ export class Renderer {
         // Pre-allocate Leaderboard & Queue Lines
         this.setupHUDLayout();
 
-        this.setupVideoBackground();
-    }
-
-    private async setupVideoBackground() {
-        try {
-            const texture = await PIXI.Assets.load({
-                src: "/bg.mp4",
-                loadParser: "loadVideo",
-            });
-            this.bgVideoSprite = new PIXI.Sprite(texture);
-            this.bgVideoSprite.width = this.app.screen.width;
-            this.bgVideoSprite.height = this.app.screen.height;
-            const source = texture.source.resource as HTMLVideoElement;
-            source.loop = true;
-            source.muted = true;
-            source.play();
-            this.layers.bg.addChild(this.bgVideoSprite);
-        } catch (e) {
-            console.error(e);
+        // Pre-allocate particles to avoid frame spikes
+        for (let i = 0; i < 500; i++) {
+            const s = new PIXI.Sprite(this.particleTexture!);
+            s.anchor.set(0.5);
+            s.visible = false;
+            this.particleContainer.addChild(s);
+            this.particlePool.push(s);
         }
     }
+
 
     public render(game: Game) {
         if (!this.app.renderer) return;
@@ -214,27 +198,22 @@ export class Renderer {
         this.drawArena(game.arenaX, game.arenaY, game.arenaW, game.arenaH);
 
         const playerCount = game.players.length;
-        const activeIds = new Set<string>();
-
         for (let i = 0; i < playerCount; i++) {
             const player = game.players[i];
             if (player.isDead) continue;
-            activeIds.add(player.id);
             this.updatePlayerView(player);
         }
 
-        // Remove dead/gone players
-        const toDelete: string[] = [];
-        this.viewCache.forEach((_, id) => {
-            if (!activeIds.has(id)) toDelete.push(id);
-        });
-        for (const id of toDelete) {
-            const cache = this.viewCache.get(id);
-            if (cache) {
-                this.layers.players.removeChild(cache.view);
-                cache.view.destroy({ children: true });
-                this.viewCache.delete(id);
-            }
+        // Remove dead/gone players - O(n) scan without allocating a Set
+        if (this.viewCache.size > playerCount) {
+            this.viewCache.forEach((cache, id) => {
+                // O(1) lookup via tiktokUsers map rather than building a new Set
+                if (!game.tiktokUsers.has(id)) {
+                    this.layers.players.removeChild(cache.view);
+                    cache.view.destroy({ children: true });
+                    this.viewCache.delete(id);
+                }
+            });
         }
 
         // Y-sort throttled: sorting 1000 items every frame is O(n log n) wasted work.
@@ -246,7 +225,6 @@ export class Renderer {
         }
 
         this.updateParticles();
-        this.updateHUD(game);
         if (this.fpsText) this.fpsText.text = `FPS: ${game.fps}`;
     }
 
@@ -396,8 +374,8 @@ export class Renderer {
             const sprite = cache.swordSprites[i];
             if (!sprite) continue;
 
-            // Visibility based on current active swords
-            const isActive = i < player.swordCount;
+            // Visibility based on symmetrically active slots
+            const isActive = player.activeSwordSlots[i];
             sprite.visible = isActive;
 
             if (isActive) {
@@ -420,6 +398,7 @@ export class Renderer {
         const ents = query(world, [Position, ParticleState]);
         const count = ents.length;
 
+        // Ensure pool is large enough
         while (this.particlePool.length < count) {
             const s = new PIXI.Sprite(this.particleTexture!);
             s.anchor.set(0.5);
@@ -427,19 +406,19 @@ export class Renderer {
             this.particlePool.push(s);
         }
 
+        // Hot path: Only loop through what is necessary
         for (let i = 0; i < this.particlePool.length; i++) {
             const s = this.particlePool[i];
             if (i < count) {
                 const eid = ents[i];
                 s.visible = true;
-                s.position.set(Position.x[eid], Position.y[eid]);
-                const life = ParticleState.life[eid];
-                s.alpha = life / ParticleState.maxLife[eid]; // Math.max(0,…) unnecessary: life >= 0 by design
-                // Use pre-parsed LUT instead of parseInt + replace every frame
-                s.tint =
-                    PARTICLE_COLOR_LUT[ParticleState.colorId[eid]] ?? 0xffffff;
+                s.x = Position.x[eid];
+                s.y = Position.y[eid];
+                s.alpha = ParticleState.life[eid] / ParticleState.maxLife[eid];
+                s.tint = PARTICLE_COLOR_LUT[ParticleState.colorId[eid]] ?? 0xffffff;
             } else {
-                s.visible = false;
+                if (s.visible) s.visible = false; // Only set if state changes
+                else break; // Since we fill pool sequentially, we can break early
             }
         }
     }
@@ -489,8 +468,24 @@ export class Renderer {
     }
 
     public updateHUD(game: Game) {
-        // Update Leaderboard
-        const topPlayers = [...game.players].sort((a, b) => b.hp - a.hp).slice(0, 5);
+        // Sort top-5 without copying the whole array (insertion sort over small slice)
+        const players = game.players;
+        const topPlayers: typeof players = [];
+        for (let i = 0; i < players.length; i++) {
+            const p = players[i];
+            // Insertion-sort into topPlayers (max 5 entries, extremely cheap)
+            let inserted = false;
+            for (let j = 0; j < topPlayers.length; j++) {
+                if (p.hp > topPlayers[j].hp) {
+                    topPlayers.splice(j, 0, p);
+                    if (topPlayers.length > 5) topPlayers.pop();
+                    inserted = true;
+                    break;
+                }
+            }
+            if (!inserted && topPlayers.length < 5) topPlayers.push(p);
+        }
+
         for (let i = 0; i < 5; i++) {
             const line = this.lbLines[i];
             const p = topPlayers[i];

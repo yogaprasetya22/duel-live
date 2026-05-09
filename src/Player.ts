@@ -39,6 +39,20 @@ export class Player {
     knifeParts: Matter.Body[] = [];
     knifeLocalPositions: { x: number; y: number }[] = [];
     knifeLocalAngles: number[] = [];
+    activeSwordSlots: boolean[] = []; // Which of the 8 slots are currently active
+
+    // Symmetrical patterns for up to 8 swords
+    private readonly SWORD_PATTERNS = [
+        [], // 0
+        [0], // 1
+        [0, 4], // 2 (Top, Bottom)
+        [0, 3, 5], // 3 (Top, Bottom-Right, Bottom-Left)
+        [0, 2, 4, 6], // 4 (Cross)
+        [0, 2, 3, 5, 6], // 5
+        [0, 1, 2, 4, 5, 6], // 6
+        [0, 1, 2, 3, 4, 5, 6], // 7
+        [0, 1, 2, 3, 4, 5, 6, 7] // 8
+    ];
 
     constructor(
         world: Matter.World,
@@ -103,10 +117,8 @@ export class Player {
                     ...CIRCLE_OPTIONS,
                     label: "player-knife",
                     angle: angle - Math.PI / 2,
-                    isSensor: i >= this.swordCount, // Only first 'swordCount' are active
-                    collisionFilter: {
-                        mask: i < this.swordCount ? 0xFFFFFFFF : 0 // Disable collision for inactive swords
-                    }
+                    isSensor: true, // Will be set correctly in repositionSwords()
+                    collisionFilter: { mask: 0 } // Base mask
                 },
             );
             (knifePart as any).playerId = this.id;
@@ -114,6 +126,7 @@ export class Player {
             this.knifeParts.push(knifePart);
             this.knifeLocalPositions.push({ x: kx - x, y: ky - y });
             this.knifeLocalAngles.push(angle + Math.PI / 2);
+            this.activeSwordSlots.push(false);
         }
 
         const body = Body.create({
@@ -123,6 +136,7 @@ export class Player {
         });
 
         Body.setInertia(body, body.inertia * 0.5);
+        this.repositionSwords(); // Initialize active slots
         return body;
     }
 
@@ -133,36 +147,15 @@ export class Player {
     }
 
     repositionSwords() {
-        const maxSwords = GAME_CONFIG.MAX_SWORDS;
-        const activeCount = this.swordCount;
-        const scaleFactor = this.radius / GAME_CONFIG.PLAYER_RADIUS;
-        const knifeHeight = GAME_CONFIG.KNIFE_HEIGHT * scaleFactor;
-        const dist = this.radius + knifeHeight / 2;
-
-        for (let i = 0; i < maxSwords; i++) {
+        const pattern = this.SWORD_PATTERNS[Math.min(this.swordCount, GAME_CONFIG.MAX_SWORDS)] || this.SWORD_PATTERNS[8];
+        
+        for (let i = 0; i < GAME_CONFIG.MAX_SWORDS; i++) {
             const kp = this.knifeParts[i];
-            const isActive = i < activeCount;
-
+            const isActive = pattern.includes(i);
+            
+            this.activeSwordSlots[i] = isActive;
             kp.isSensor = !isActive;
-            kp.collisionFilter.mask = isActive ? 0xFFFFFFFF : 0;
-
-            if (isActive) {
-                // Kalkulasi ulang sudut agar proporsional (seperti sebelumnya)
-                const angle = Math.PI / 2 + i * ((Math.PI * 2) / activeCount);
-                
-                // Update posisi lokal
-                const lx = Math.cos(angle) * dist;
-                const ly = Math.sin(angle) * dist;
-                
-                this.knifeLocalPositions[i] = { x: lx, y: ly };
-                this.knifeLocalAngles[i] = angle + Math.PI / 2;
-
-                // Update posisi fisik relatif ke body
-                const worldX = this.body.position.x + lx;
-                const worldY = this.body.position.y + ly;
-                Body.setPosition(kp, { x: worldX, y: worldY });
-                Body.setAngle(kp, angle - Math.PI / 2);
-            }
+            // NOTE: collisionFilter on parts is overridden by parent, so isSensor is the source of truth
         }
     }
     grow(factor: number) {
@@ -310,15 +303,17 @@ export class Player {
 
         // ── Update Sword Trails (Circular Buffer - Zero Allocation) ──
         const knifeParts = this.knifeParts;
-        const knifeCount = knifeParts.length;
 
-        if (this.swordTrails.length !== knifeCount) {
-            // Re-allocate only when sword count changes
-            this.swordTrails = Array.from({ length: knifeCount }, () => new Float32Array(GAME_CONFIG.SWORD_TRAIL_LENGTH * 2));
-            this.swordTrailIndices = new Uint32Array(knifeCount);
+        if (this.swordTrails.length !== knifeParts.length) {
+            // Re-allocate only when total capacity changes (rare)
+            this.swordTrails = Array.from({ length: knifeParts.length }, () => new Float32Array(GAME_CONFIG.SWORD_TRAIL_LENGTH * 2));
+            this.swordTrailIndices = new Uint32Array(knifeParts.length);
         }
 
-        for (let i = 0; i < knifeCount; i++) {
+        // ONLY update trails for active swords to save CPU
+        for (let i = 0; i < GAME_CONFIG.MAX_SWORDS; i++) {
+            if (!this.activeSwordSlots[i]) continue;
+            
             const kPart = knifeParts[i];
             const verts = kPart.vertices;
 
@@ -329,11 +324,9 @@ export class Player {
             const trail = this.swordTrails[i];
             const head = this.swordTrailIndices[i];
             
-            // Insert at current head
             trail[head * 2] = tipX;
             trail[head * 2 + 1] = tipY;
             
-            // Move head forward (wrap around)
             this.swordTrailIndices[i] = (head + 1) % GAME_CONFIG.SWORD_TRAIL_LENGTH;
         }
     }

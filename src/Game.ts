@@ -54,6 +54,22 @@ export class Game {
     private lastFpsUpdate: number = 0;
     private spatialHash!: SpatialHash;
     private queryBuffer: Uint32Array = new Uint32Array(512); // Pre-allocated buffer for search
+    
+    // Performance Tracking
+    private perfHistory: { 
+        t: number, 
+        fps: number, 
+        dt: number,
+        physics: number,
+        logic: number,
+        render: number,
+        mem?: number,
+        players: number, 
+        particles: number 
+    }[] = [];
+    private maxPerfEntries: number = 5000;
+    private frameCounter: number = 0;
+    private _lastParticleCount: number = 0; // cached from logic pass to avoid double ECS query
 
     constructor(canvas: HTMLCanvasElement) {
         this.spatialHash = new SpatialHash(2000, 2000, 150);
@@ -196,17 +212,18 @@ export class Game {
         const userId = data.uniqueId;
         const player = this.tiktokUsers.get(userId);
 
-        // Only allow spawning if player is NOT in game or is DEAD
         if (player && !player.isDead) {
-            // If already alive, just boost movement
-            const force = GAME_CONFIG.CHAT_BOOST_FORCE;
+            // BRUTAL CHAT: Stronger force + minor shake + small particle burst
+            const force = GAME_CONFIG.CHAT_BOOST_FORCE * 1.5;
             const angle = Math.random() * Math.PI * 2;
             Body.applyForce(player.body, player.body.position, {
                 x: Math.cos(angle) * force,
                 y: Math.sin(angle) * force,
             });
+            
+            this.shakeAmount = Math.max(this.shakeAmount, 2);
+            for(let i=0; i<2; i++) createParticle(player.body.position.x, player.body.position.y, 1);
         } else {
-            // Queue new player spawn
             this.queueSpawn(data.profilePictureUrl, userId);
         }
     }
@@ -226,22 +243,58 @@ export class Game {
         const userId = data.uniqueId;
         let player = this.tiktokUsers.get(userId);
 
-        // Respawn if dead or not exists
         if (!player || player.isDead) {
             this.queueSpawn(data.profilePictureUrl, userId);
             player = this.tiktokUsers.get(userId);
         }
 
         if (player && !player.isDead) {
-            // Gift 1 coin = +50 HP
             const diamonds = data.diamondCount || 1;
+            
+            // BRUTAL GIFT: Explosive effects
             player.hp += diamonds * GAME_CONFIG.GIFT_HP_BONUS;
+            player.grow(1 + 0.05 * Math.log10(diamonds + 1)); // Logarithmic growth to avoid infinite size too fast
+            
+            // Multiple swords for bigger gifts
+            const swordsToAdd = Math.min(5, Math.ceil(diamonds / 5));
+            for(let i=0; i<swordsToAdd; i++) player.addSword();
 
-            // Grow size: 2% per diamond
-            player.grow(1 + 0.02 * diamonds);
+            // Massive particle explosion
+            const particleCount = Math.min(50, 10 + diamonds);
+            for (let i = 0; i < particleCount; i++) {
+                createParticle(player.body.position.x, player.body.position.y, Math.floor(Math.random() * 5));
+            }
 
-            // Also add a sword for any gift
-            player.addSword();
+            // Screen shake proportional to gift value
+            this.shakeAmount = Math.min(25, this.shakeAmount + 5 + (diamonds * 0.5));
+            
+            // Apply massive radial impulse to nearby players (Optimized via SpatialHash)
+            const pushForce = 0.01 * diamonds;
+            const queryRadius = 300;
+            const foundCount = this.spatialHash.query(
+                player.body.position.x,
+                player.body.position.y,
+                queryRadius,
+                this.queryBuffer
+            );
+
+            for (let i = 0; i < foundCount; i++) {
+                const otherIdx = this.queryBuffer[i];
+                const p = this.players[otherIdx];
+                
+                if (!p || p === player || p.isDead) continue;
+                
+                const dx = p.body.position.x - player.body.position.x;
+                const dy = p.body.position.y - player.body.position.y;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                
+                if (dist > 0 && dist < queryRadius) {
+                    Body.applyForce(p.body, p.body.position, {
+                        x: (dx/dist) * pushForce,
+                        y: (dy/dist) * pushForce
+                    });
+                }
+            }
         }
     }
 
@@ -360,31 +413,31 @@ export class Game {
 
                 if (!idA || !idB || idA === idB) continue;
 
-                const aIsKnife = bodyA.label === "player-knife";
-                const bIsKnife = bodyB.label === "player-knife";
+                const aIsKnife = bodyA.label === "player-knife" && !bodyA.isSensor;
+                const bIsKnife = bodyB.label === "player-knife" && !bodyB.isSensor;
                 const aIsBody = bodyA.label === "player-body";
                 const bIsBody = bodyB.label === "player-body";
 
                 if (aIsKnife && bIsBody && pB) {
-                    if (pB.takeDamage() && pA) {
-                        pA.onHitDealt();
+                    if (pB.takeDamage()) {
+                        if (pA) pA.onHitDealt();
+                        this.playHitSfx();
+                        this.createHitEffect(
+                            pair.collision.supports[0]?.x || parentB.position.x,
+                            pair.collision.supports[0]?.y || parentB.position.y,
+                            0,
+                        );
                     }
-                    this.playHitSfx();
-                    this.createHitEffect(
-                        pair.collision.supports[0]?.x || parentB.position.x,
-                        pair.collision.supports[0]?.y || parentB.position.y,
-                        0,
-                    );
                 } else if (bIsKnife && aIsBody && pA) {
-                    if (pA.takeDamage() && pB) {
-                        pB.onHitDealt();
+                    if (pA.takeDamage()) {
+                        if (pB) pB.onHitDealt();
+                        this.playHitSfx();
+                        this.createHitEffect(
+                            pair.collision.supports[0]?.x || parentA.position.x,
+                            pair.collision.supports[0]?.y || parentA.position.y,
+                            0,
+                        );
                     }
-                    this.playHitSfx();
-                    this.createHitEffect(
-                        pair.collision.supports[0]?.x || parentA.position.x,
-                        pair.collision.supports[0]?.y || parentA.position.y,
-                        0,
-                    );
                 }
             }
         });
@@ -475,7 +528,6 @@ export class Game {
         this.initArena();
 
         this.lastTime = performance.now();
-        requestAnimationFrame((t) => this.loop(t));
     }
 
     loop(timestamp: number) {
@@ -489,51 +541,54 @@ export class Game {
             this.lastFpsUpdate = timestamp;
         }
 
+        let physicsTime = 0;
+        let logicTime = 0;
+        let renderTime = 0;
+
         if (this.state === "gameover") {
+            const startLogic = performance.now();
             this.restartTimer -= delta;
             if (this.restartTimer <= 0) {
                 this.reset();
-                return;
+                // Don't return — keep the loop alive by falling through to rAF at the bottom
             }
+            logicTime = performance.now() - startLogic;
         } else {
+            // PHYSICS
+            const startPhysics = performance.now();
             Engine.update(this.engine, 1000 / 60);
+            physicsTime = performance.now() - startPhysics;
 
-            const deadPlayers = this.players.filter((p) => p.isDead);
-            if (deadPlayers.length > 0) {
-                deadPlayers.forEach((player) => {
+            // LOGIC (AI, ECS, State)
+            const startLogic = performance.now();
+            const aliveCount = this.players.length;
+            let deadFound = false;
+            for (let i = 0; i < aliveCount; i++) {
+                const player = this.players[i];
+                if (player.isDead) {
+                    deadFound = true;
                     this.unregisterPlayerBody(player);
-                    World.remove(this.world, player.body); // Take out of physics world
+                    World.remove(this.world, player.body); 
                     this.tiktokUsers.delete(player.id);
                     this.respawnCooldowns.set(
                         player.id,
                         Date.now() + GAME_CONFIG.RESPAWN_COOLDOWN,
                     );
-                    
-                    // Push to pool instead of destroying
                     this.playerPool.push(player);
 
-                    // AUTO-RESPAWN logic
                     if (this.activeMembers.has(player.id)) {
                         const data = this.userData.get(player.id);
                         if (data) {
-                            // Respawn after a short delay (e.g. 1 second)
                             setTimeout(() => {
-                                const stillActive = this.activeMembers.has(
-                                    player.id,
-                                );
-                                const isStillDead =
-                                    !this.tiktokUsers.get(player.id) ||
-                                    this.tiktokUsers.get(player.id)!.isDead;
-                                if (stillActive && isStillDead) {
-                                    this.spawnNewPlayer(
-                                        data.profilePictureUrl,
-                                        player.id,
-                                    );
+                                if (this.activeMembers.has(player.id) && (!this.tiktokUsers.get(player.id) || this.tiktokUsers.get(player.id)!.isDead)) {
+                                    this.spawnNewPlayer(data.profilePictureUrl, player.id);
                                 }
                             }, 1000);
                         }
                     }
-                });
+                }
+            }
+            if (deadFound) {
                 this.players = this.players.filter((p) => !p.isDead);
             }
 
@@ -545,25 +600,24 @@ export class Game {
                 if (next) this.spawnNewPlayer(next.avatarUrl, next.name);
             }
 
+            // Logic for particles (reuse query result in perf log below)
             const ents = query(world, [Position, Velocity, ParticleState]);
+            let particleCount = 0;
             for (let i = 0; i < ents.length; i++) {
                 const eid = ents[i];
-
                 Position.x[eid] += Velocity.x[eid];
                 Position.y[eid] += Velocity.y[eid];
                 Velocity.y[eid] += GAME_CONFIG.PARTICLE_GRAVITY;
-
                 ParticleState.life[eid] -= GAME_CONFIG.PARTICLE_DECAY;
-
                 if (ParticleState.life[eid] <= 0) {
                     removeEntity(world, eid);
+                } else {
+                    particleCount++;
                 }
             }
-
-            const alivePlayers = this.players; // already filtered dead out above
+            const alivePlayers = this.players; 
             const frameCount = Math.floor(timestamp / 16);
 
-            // ── SPATIAL GRID FOR AI OPTIMIZATION (ZERO ALLOCATION) ──
             this.spatialHash.clear();
             for (let i = 0; i < alivePlayers.length; i++) {
                 const p = alivePlayers[i];
@@ -576,21 +630,17 @@ export class Game {
                 let nearestOpponent: Player | null = null;
                 if ((frameCount + i) % 30 === 0) {
                     let minDist = Infinity;
-                    
-                    // Search in nearby cells
                     const foundCount = this.spatialHash.query(
                         player.body.position.x,
                         player.body.position.y,
-                        300, // Search radius
+                        300, 
                         this.queryBuffer
                     );
 
                     for (let j = 0; j < foundCount; j++) {
                         const otherIdx = this.queryBuffer[j];
                         const other = alivePlayers[otherIdx];
-                        
                         if (other === player) continue;
-                        
                         const dx = other.body.position.x - player.body.position.x;
                         const dy = other.body.position.y - player.body.position.y;
                         const dist = dx * dx + dy * dy;
@@ -600,7 +650,6 @@ export class Game {
                         }
                     }
 
-                    // Fallback to global search (O(N)) ONLY IF NO ONE NEARBY
                     if (!nearestOpponent && alivePlayers.length > 1) {
                         for (let j = 0; j < alivePlayers.length; j++) {
                             const other = alivePlayers[j];
@@ -624,8 +673,7 @@ export class Game {
                 const margin = GAME_CONFIG.ARENA_MARGIN;
                 const px = player.body.position.x;
                 const py = player.body.position.y;
-                let pushX = 0,
-                    pushY = 0;
+                let pushX = 0, pushY = 0;
                 if (px < this.arenaX - margin) pushX = 1;
                 if (px > this.arenaX + this.arenaW + margin) pushX = -1;
                 if (py < this.arenaY - margin) pushY = 1;
@@ -637,14 +685,8 @@ export class Game {
                         y: player.body.velocity.y * 0.5 + pushY * pushForce,
                     });
                     Body.setPosition(player.body, {
-                        x: Math.max(
-                            this.arenaX,
-                            Math.min(this.arenaX + this.arenaW, px),
-                        ),
-                        y: Math.max(
-                            this.arenaY,
-                            Math.min(this.arenaY + this.arenaH, py),
-                        ),
+                        x: Math.max(this.arenaX, Math.min(this.arenaX + this.arenaW, px)),
+                        y: Math.max(this.arenaY, Math.min(this.arenaY + this.arenaH, py)),
                     });
                 }
             }
@@ -658,13 +700,55 @@ export class Game {
             } else if (this.players.length > 1) {
                 this.victoryTimer = GAME_CONFIG.VICTORY_TIMER;
             }
+            logicTime = performance.now() - startLogic;
+
+            // Cache particle count for perf log (avoids a second ECS query below)
+            this._lastParticleCount = particleCount;
         }
 
         this.shakeAmount *= 0.9;
         if (this.shakeAmount < 0.1) this.shakeAmount = 0;
 
+        // RENDER
+        const startRender = performance.now();
         this.render();
+        renderTime = performance.now() - startRender;
+
+        // Throttled HUD update
+        if (Math.floor(timestamp / 16) % 10 === 0) {
+            this.renderer.updateHUD(this);
+        }
+
+        // PERFORMANCE LOGGING (Every 5 frames)
+        this.frameCounter++;
+        if (this.frameCounter % 5 === 0) {
+            const memory = (performance as any).memory;
+            this.perfHistory.push({
+                t: Math.floor(timestamp),
+                fps: this.fps,
+                dt: parseFloat(delta.toFixed(2)),
+                physics: parseFloat(physicsTime.toFixed(2)),
+                logic: parseFloat(logicTime.toFixed(2)),
+                render: parseFloat(renderTime.toFixed(2)),
+                mem: memory ? Math.round(memory.usedJSHeapSize / 1048576) : undefined,
+                players: this.players.length,
+                particles: this._lastParticleCount  // cached — no extra ECS query
+            });
+            if (this.perfHistory.length > this.maxPerfEntries) this.perfHistory.shift();
+        }
+
         requestAnimationFrame((t) => this.loop(t));
+    }
+
+    public downloadPerfLog() {
+        const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(this.perfHistory, null, 2));
+        const downloadAnchorNode = document.createElement('a');
+        downloadAnchorNode.setAttribute("href",     dataStr);
+        downloadAnchorNode.setAttribute("download", "perf_log.json");
+        document.body.appendChild(downloadAnchorNode);
+        downloadAnchorNode.click();
+        downloadAnchorNode.remove();
+        console.log("Performance log exported!");
     }
 
     render() {

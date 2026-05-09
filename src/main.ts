@@ -15,10 +15,13 @@ if (canvas) {
     connectorDiv.classList.add('hidden');
   });
 
-  // Re-show panel on key press (e.g. Escape)
+  // Keyboard controls
   window.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
+    if (e.key === 'Escape' || e.key === 'h' || e.key === 'H') {
       connectorDiv.classList.toggle('hidden');
+    }
+    if (e.key === 'p' || e.key === 'P') {
+      game.downloadPerfLog();
     }
   });
 
