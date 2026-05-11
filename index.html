@@ -49,27 +49,29 @@
       /* Premium Panel Style */
       #connector {
         position: absolute;
-        z-index: 100;
-        background: var(--panel-bg);
-        padding: 2.5rem;
-        border: 1px solid var(--glass-border);
-        border-radius: 24px;
-        backdrop-filter: blur(20px);
+        z-index: 500;
+        background: rgba(10, 15, 25, 0.95);
+        padding: 3rem;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 32px;
+        backdrop-filter: blur(40px);
         display: flex;
         flex-direction: column;
-        gap: 1.2rem;
+        gap: 1.5rem;
         width: 380px;
-        box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
+        max-width: 90vw;
+        box-shadow: 0 40px 100px rgba(0,0,0,0.9), 0 0 40px rgba(0, 255, 65, 0.1);
         transition: all 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+        border-top: 1px solid rgba(255, 255, 255, 0.2);
       }
 
       #connector h1 {
         font-family: 'Orbitron', sans-serif;
-        font-size: 1.4rem;
+        font-size: 1.6rem;
         text-align: center;
-        letter-spacing: 2px;
+        letter-spacing: 6px;
         margin-bottom: 0.5rem;
-        background: linear-gradient(90deg, #fff, var(--primary));
+        background: linear-gradient(180deg, #fff 0%, var(--primary) 100%);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
         font-weight: 900;
@@ -77,143 +79,128 @@
 
       #close-btn {
         position: absolute;
-        top: 15px;
-        right: 15px;
-        background: rgba(255, 255, 255, 0.05);
-        border: none;
-        color: #666;
-        width: 32px;
-        height: 32px;
+        top: 20px;
+        right: 20px;
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        color: #fff;
+        width: 40px;
+        height: 40px;
         border-radius: 50%;
         cursor: pointer;
         display: flex;
         align-items: center;
         justify-content: center;
-        font-size: 14px;
+        font-size: 16px;
         transition: all 0.3s;
       }
 
       #close-btn:hover {
-        background: rgba(255, 0, 0, 0.2);
-        color: white;
+        background: rgba(255, 0, 0, 0.4);
+        border-color: #ff0000;
+        transform: rotate(90deg);
       }
 
       .input-group {
         position: relative;
-        display: flex;
-        flex-direction: column;
-        gap: 0.5rem;
       }
 
       input {
-        padding: 1rem 1.2rem;
-        background: rgba(0, 0, 0, 0.3);
-        border: 1px solid #333;
+        width: 100%;
+        padding: 1.2rem 1.5rem;
+        background: rgba(0, 0, 0, 0.4);
+        border: 1px solid rgba(255, 255, 255, 0.1);
         color: white;
-        border-radius: 12px;
+        border-radius: 16px;
         font-size: 1rem;
         outline: none;
         transition: all 0.3s;
-        border-left: 4px solid #333;
+        font-family: 'Inter', sans-serif;
+        text-align: center;
       }
 
       input:focus {
         border-color: var(--primary);
-        border-left-color: var(--primary);
         background: rgba(0, 255, 65, 0.05);
-        box-shadow: 0 0 15px var(--primary-glow);
+        box-shadow: 0 0 20px var(--primary-glow);
       }
 
       .btn-container {
         display: flex;
         flex-direction: column;
-        gap: 0.8rem;
-        margin-top: 0.5rem;
+        gap: 1rem;
       }
 
       button {
-        padding: 1rem;
+        padding: 1.2rem;
         border: none;
-        color: black;
-        font-weight: bold;
+        font-weight: 900;
         cursor: pointer;
-        border-radius: 12px;
+        border-radius: 16px;
         font-family: 'Orbitron', sans-serif;
-        font-size: 0.9rem;
+        font-size: 1rem;
         text-transform: uppercase;
-        letter-spacing: 1px;
-        transition: all 0.3s;
-        position: relative;
-        overflow: hidden;
+        letter-spacing: 3px;
+        transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
       }
 
       #connect-btn {
-        background: linear-gradient(135deg, var(--primary), #00cc33);
-        box-shadow: 0 4px 15px var(--primary-glow);
+        background: linear-gradient(90deg, var(--primary), #00e5ff);
+        color: black;
+        box-shadow: 0 10px 20px rgba(0, 255, 65, 0.3);
       }
 
       #connect-btn:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 8px 25px var(--primary-glow);
-        filter: brightness(1.1);
+        transform: translateY(-4px);
+        box-shadow: 0 20px 40px rgba(0, 255, 65, 0.4);
       }
 
       #test-btn {
-        background: rgba(255, 255, 255, 0.05);
+        background: rgba(255, 255, 255, 0.03);
         color: white;
         border: 1px solid rgba(255, 255, 255, 0.1);
       }
 
       #test-btn:hover {
-        background: rgba(255, 255, 255, 0.15);
+        background: rgba(255, 255, 255, 0.08);
         border-color: var(--accent);
         color: var(--accent);
-        box-shadow: 0 0 15px rgba(0, 229, 255, 0.2);
-      }
-
-      button:active {
-        transform: translateY(0);
       }
 
       #status-container {
         display: flex;
         align-items: center;
         justify-content: center;
-        gap: 8px;
-        margin-top: 5px;
+        gap: 12px;
+        margin-top: 10px;
+        padding: 10px;
+        background: rgba(0,0,0,0.2);
+        border-radius: 12px;
       }
 
       .status-dot {
-        width: 8px;
-        height: 8px;
+        width: 10px;
+        height: 10px;
         border-radius: 50%;
-        background: #ff4b2b;
-        box-shadow: 0 0 8px #ff4b2b;
+        background: #ff3e3e;
       }
 
       .status-dot.online {
         background: var(--primary);
-        box-shadow: 0 0 8px var(--primary);
+        box-shadow: 0 0 12px var(--primary);
         animation: pulse 2s infinite;
       }
 
       #status { 
-        color: #888; 
-        font-size: 0.75rem; 
-        text-transform: uppercase;
-        letter-spacing: 1px;
-      }
-
-      @keyframes pulse {
-        0% { transform: scale(1); opacity: 1; }
-        50% { transform: scale(1.5); opacity: 0.5; }
-        100% { transform: scale(1); opacity: 1; }
+        color: rgba(255,255,255,0.5); 
+        font-size: 0.8rem; 
+        font-weight: 700;
       }
 
       .hidden {
         opacity: 0;
         pointer-events: none;
-        transform: scale(0.9) translateY(20px);
+        transform: scale(0.95) translateY(30px);
       }
     </style>
   </head>
@@ -240,6 +227,6 @@
       </div>
       <canvas id="game"></canvas>
     </div>
-    <script type="module" src="/src/main.ts"></script>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

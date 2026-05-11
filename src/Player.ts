@@ -18,6 +18,9 @@ export class Player {
     radius: number;
     hp: number = GAME_CONFIG.INITIAL_HP;
     isDead: boolean = false;
+    isElite: boolean = false;
+    isEpic: boolean = false;
+    isLegendary: boolean = false;
     hitCooldown: number = 0;
     isHit: boolean = false;
     hitFlashTimer: number = 0;
@@ -26,6 +29,7 @@ export class Player {
     avatarImg: HTMLImageElement | null;
     knifeImg: HTMLImageElement | null;
     tiktokProfileImg: HTMLImageElement | null = null;
+    prestigeTier: number = 0; // 0: None, 1: Elite, 2: Epic, 3: Legendary
     knifeOffsetDistance: number;
     knifeLocalAngle: number;
     body: Matter.Body;
@@ -41,17 +45,13 @@ export class Player {
     knifeLocalAngles: number[] = [];
     activeSwordSlots: boolean[] = []; // Which of the 8 slots are currently active
 
-    // Symmetrical patterns for up to 8 swords
+    // Symmetrical patterns for up to 4 slots (Top, Right, Bottom, Left)
     private readonly SWORD_PATTERNS = [
         [], // 0
-        [0], // 1
-        [0, 4], // 2 (Top, Bottom)
-        [0, 3, 5], // 3 (Top, Bottom-Right, Bottom-Left)
-        [0, 2, 4, 6], // 4 (Cross)
-        [0, 2, 3, 5, 6], // 5
-        [0, 1, 2, 4, 5, 6], // 6
-        [0, 1, 2, 3, 4, 5, 6], // 7
-        [0, 1, 2, 3, 4, 5, 6, 7] // 8
+        [0], // 1 (Top)
+        [0, 2], // 2 (Top, Bottom)
+        [0, 1, 3], // 3 (Top, Right, Left)
+        [0, 1, 2, 3], // 4 (Cross - 4 Sides)
     ];
 
     constructor(
@@ -115,6 +115,7 @@ export class Player {
                 knifeHeight,
                 {
                     ...CIRCLE_OPTIONS,
+                    density: GAME_CONFIG.PLAYER_DENSITY * 1.5, // Heavier knives (approx 1:1 mass ratio total)
                     label: "player-knife",
                     angle: angle - Math.PI / 2,
                     isSensor: true, // Will be set correctly in repositionSwords()
@@ -135,7 +136,7 @@ export class Player {
             restitution: GAME_CONFIG.PLAYER_RESTITUTION,
         });
 
-        Body.setInertia(body, body.inertia * 0.5);
+        Body.setInertia(body, body.inertia * 1.5); // Increase inertia so it resists rotation more
         this.repositionSwords(); // Initialize active slots
         return body;
     }
@@ -158,26 +159,92 @@ export class Player {
             // NOTE: collisionFilter on parts is overridden by parent, so isSensor is the source of truth
         }
     }
-    grow(factor: number) {
-        this.radius *= factor;
-        this.knifeOffsetDistance *= factor;
+    lastSkillTime: number = 0;
+    lastLightningTime: number = 0;
+
+    grow(_factor: number) {
+        // Growth is now handled dynamically by syncSizeToHp()
+    }
+
+    syncSwordsToHp() {
+        let targetSwords = 1;
+        if (this.hp >= GAME_CONFIG.SWORD_HP_TIER_4) targetSwords = 4;
+        else if (this.hp >= GAME_CONFIG.SWORD_HP_TIER_3) targetSwords = 3;
+        else if (this.hp >= GAME_CONFIG.SWORD_HP_TIER_2) targetSwords = 2;
+
+        if (this.swordCount !== targetSwords) {
+            this.swordCount = targetSwords;
+            this.repositionSwords();
+        }
+    }
+
+    syncSizeToHp(baseRadius: number, maxRadius: number) {
+        const initialHp = 10;
+        if (this.hp <= initialHp) {
+            if (this.radius !== baseRadius) this.updateRadius(baseRadius);
+            return;
+        }
+
+        // Formula for 100% accuracy: Radius = Base + log10(HP / Initial) * 20
+        const logRatio = Math.log10(this.hp / initialHp);
+        const targetRadius = Math.min(maxRadius, baseRadius + logRatio * 20);
+        
+        if (Math.abs(this.radius - targetRadius) > 0.5) {
+            this.updateRadius(targetRadius);
+        }
+    }
+
+    private updateRadius(newRadius: number) {
+        const scaleFactor = newRadius / this.radius;
+        this.radius = newRadius;
+        this.knifeOffsetDistance *= scaleFactor;
+
+        // Scale visual local positions so they match the physics scaling
+        for (let i = 0; i < this.knifeLocalPositions.length; i++) {
+            this.knifeLocalPositions[i].x *= scaleFactor;
+            this.knifeLocalPositions[i].y *= scaleFactor;
+        }
         
         // Use efficient physics scaling
-        Body.scale(this.body, factor, factor);
-        
-        // Notify game/renderer if needed (Renderer already checks radius change every frame)
+        Matter.Body.scale(this.body, scaleFactor, scaleFactor);
     }
 
     // Reset player for pooling
-    reset(x: number, y: number, name: string, avatar: HTMLImageElement | null) {
+    reset(x: number, y: number, name: string, avatar: HTMLImageElement | null, baseRadius: number) {
+        // Reset radius and physical scale to original before doing anything else
+        const targetRadius = baseRadius;
+        const scaleBack = targetRadius / this.radius;
+        if (scaleBack !== 1) {
+            Body.scale(this.body, scaleBack, scaleBack);
+            this.radius = targetRadius;
+            this.knifeOffsetDistance = this.radius + GAME_CONFIG.KNIFE_OFFSET;
+            
+            // Restore original local positions (spaced for 4 swords as per recent fix)
+            const knifeHeight = GAME_CONFIG.KNIFE_HEIGHT;
+            const dist = this.radius + knifeHeight / 2;
+            const maxSwords = GAME_CONFIG.MAX_SWORDS;
+            
+            for (let i = 0; i < maxSwords; i++) {
+                const angle = Math.PI / 2 + i * ((Math.PI * 2) / maxSwords);
+                this.knifeLocalPositions[i] = { 
+                    x: Math.cos(angle) * dist, 
+                    y: Math.sin(angle) * dist 
+                };
+            }
+        }
+
         this.id = name;
         this.avatarImg = avatar;
         this.hp = GAME_CONFIG.INITIAL_HP;
         this.isDead = false;
+        this.isElite = false;
+        this.isEpic = false;
+        this.isLegendary = false;
+        this.prestigeTier = 0;
         this.swordCount = 1;
         this.hitsDealt = 0;
         
-        // Reset physics
+        // Reset physics state
         Body.setPosition(this.body, { x, y });
         Body.setVelocity(this.body, { x: 0, y: 0 });
         Body.setAngle(this.body, 0);
@@ -223,7 +290,7 @@ export class Player {
     }
 
     heal(amount: number) {
-        this.hp += amount;
+        this.hp = Math.min(GAME_CONFIG.MAX_PLAYER_HP, this.hp + amount);
         this.healFlashTimer = GAME_CONFIG.HEAL_FLASH_DURATION;
     }
 

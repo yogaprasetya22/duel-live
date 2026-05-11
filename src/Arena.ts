@@ -27,17 +27,6 @@ export function createArena(world: Matter.World, arenaX: number, arenaY: number,
     Bodies.rectangle(arenaX + arenaW + thickness / 2, cy, thickness, arenaH, WALL_OPTIONS),
   ];
 
-  // ── GANJELAN (Wedges/Obstacles) ──
-  const wedgeW = GAME_CONFIG.WEDGE_WIDTH;
-  const wedgeH = GAME_CONFIG.WEDGE_HEIGHT;
-  const floorY = arenaY + arenaH;
-  
-  const obstacles = [
-    Bodies.rectangle(arenaX + arenaW * 0.25, floorY - wedgeH / 2, wedgeW, wedgeH, WALL_OPTIONS),
-    Bodies.rectangle(arenaX + arenaW * 0.50, floorY - wedgeH / 2, wedgeW, wedgeH, WALL_OPTIONS),
-    Bodies.rectangle(arenaX + arenaW * 0.75, floorY - wedgeH / 2, wedgeW, wedgeH, WALL_OPTIONS),
-  ];
-
-  World.add(world, [...walls, ...obstacles]);
-  return { walls, obstacles };
+  World.add(world, [...walls]);
+  return { walls, obstacles: [] };
 }

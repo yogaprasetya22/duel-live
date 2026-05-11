@@ -40,17 +40,41 @@ export class Renderer {
     private viewCache: Map<string, PlayerViewCache> = new Map();
 
     private arenaGraphic: PIXI.Graphics;
-    private hudGraphic: PIXI.Graphics;
+    private arenaGlowGraphic: PIXI.Graphics;
+    private gridSprite: PIXI.TilingSprite | null = null;
+    private ambientParticles: PIXI.Graphics[] = [];
+    private vignette: PIXI.Graphics | null = null;
+    private scanlineSprite: PIXI.TilingSprite | null = null;
     private fpsText: PIXI.BitmapText | null = null;
-    private leaderboardContainer: PIXI.Container;
-    private queueContainer: PIXI.Container;
-    private lbLines: PIXI.BitmapText[] = [];
-    private qLines: PIXI.BitmapText[] = [];
 
     // Particle system
     private particleContainer: PIXI.Container;
     private particlePool: PIXI.Sprite[] = [];
-    private particleTexture: PIXI.Texture | null = null;
+    private particleTextures: PIXI.Texture[] = [];
+
+    // Shockwave system
+    private shockwaveContainer: PIXI.Container;
+    private shockwavePool: PIXI.Sprite[] = [];
+    private activeShockwaves: { sprite: PIXI.Sprite; life: number }[] = [];
+    private shockwaveTexture: PIXI.Texture | null = null;
+
+    // Floor Decals (Burn/Hit Marks)
+    private decalContainer: PIXI.Container;
+    private activeDecals: { sprite: PIXI.Sprite; life: number }[] = [];
+    private decalPool: PIXI.Sprite[] = [];
+    private decalTexture: PIXI.Texture | null = null;
+
+    // King Aura (Floating Crown)
+    private kingAuraContainer: PIXI.Container;
+    private kingAuraSprite: PIXI.Sprite | null = null;
+
+    // Screen effects
+    private flashOverlay: PIXI.Graphics;
+    private flashLife: number = 0;
+    
+    // Lightning system
+    private lightningGraphic: PIXI.Graphics;
+    private activeLightnings: { x1: number, y1: number, x2: number, y2: number, life: number }[] = [];
 
     // Texture cache
     private glowTexture: PIXI.Texture | null = null;
@@ -81,10 +105,13 @@ export class Renderer {
         };
 
         this.particleContainer = new PIXI.Container();
+        this.shockwaveContainer = new PIXI.Container();
+        this.decalContainer = new PIXI.Container();
+        this.kingAuraContainer = new PIXI.Container();
         this.arenaGraphic = new PIXI.Graphics();
-        this.hudGraphic = new PIXI.Graphics();
-        this.leaderboardContainer = new PIXI.Container();
-        this.queueContainer = new PIXI.Container();
+        this.arenaGlowGraphic = new PIXI.Graphics();
+        this.flashOverlay = new PIXI.Graphics();
+        this.lightningGraphic = new PIXI.Graphics();
 
         this.ready = this.init(canvas);
         window.addEventListener("resize", () => this.onResize());
@@ -93,6 +120,15 @@ export class Renderer {
     private onResize() {
         if (!this.app.renderer) return;
         this.app.renderer.resize(window.innerWidth, window.innerHeight);
+        if (this.gridSprite) {
+            this.gridSprite.width = window.innerWidth;
+            this.gridSprite.height = window.innerHeight;
+        }
+        if (this.scanlineSprite) {
+            this.scanlineSprite.width = window.innerWidth;
+            this.scanlineSprite.height = window.innerHeight;
+        }
+        this.drawVignette();
     }
 
     private async init(canvas: HTMLCanvasElement) {
@@ -101,9 +137,10 @@ export class Renderer {
             width: window.innerWidth,
             height: window.innerHeight,
             backgroundColor: GAME_CONFIG.BG_COLOR,
-            antialias: false,
-            resolution: 1,
+            antialias: window.innerWidth > 600, // Disable antialias on mobile for FPS boost
+            resolution: Math.min(window.devicePixelRatio || 1, window.innerWidth < 600 ? 2 : 3), // Cap resolution on mobile
             autoDensity: true,
+            roundPixels: true, // Faster rendering by rounding coordinates
         });
 
         this.app.stage.addChild(this.layers.bg);
@@ -111,16 +148,120 @@ export class Renderer {
         this.app.stage.addChild(this.layers.particles);
         this.app.stage.addChild(this.layers.players);
         this.app.stage.addChild(this.layers.ui);
+        this.app.stage.addChild(this.flashOverlay);
 
+        this.layers.grid.addChild(this.arenaGlowGraphic);
         this.layers.grid.addChild(this.arenaGraphic);
+        this.layers.grid.addChild(this.decalContainer); // Decals below players
+        
+        this.layers.particles.addChild(this.lightningGraphic);
+        this.layers.players.addChild(this.kingAuraContainer); // Decals below players
+        
+        this.layers.players.addChildAt(this.kingAuraContainer, 0); // King aura behind players
+        
+        this.layers.particles.addChild(this.shockwaveContainer);
         this.layers.particles.addChild(this.particleContainer);
-        this.layers.ui.addChild(this.hudGraphic);
-        this.layers.ui.addChild(this.leaderboardContainer);
-        this.layers.ui.addChild(this.queueContainer);
 
+        // ── Grid Texture ──
+        const gs = GAME_CONFIG.ARENA_GRID_SIZE;
+        const ggp = new PIXI.Graphics()
+            .rect(0, 0, gs, gs)
+            .stroke({ color: 0xffffff, width: 1, alpha: 0.5 });
+        const gridTex = this.app.renderer.generateTexture(ggp);
+        ggp.destroy();
+
+        this.gridSprite = new PIXI.TilingSprite({
+            texture: gridTex,
+            width: window.innerWidth,
+            height: window.innerHeight,
+        });
+        this.gridSprite.alpha = GAME_CONFIG.GRID_ALPHA;
+        this.layers.grid.addChildAt(this.gridSprite, 0);
+
+        // ── Ambient Particles ──
+        for (let i = 0; i < GAME_CONFIG.AMBIENT_PARTICLE_COUNT; i++) {
+            const ap = new PIXI.Graphics().circle(0, 0, 1).fill(0xffffff);
+            ap.x = Math.random() * window.innerWidth;
+            ap.y = Math.random() * window.innerHeight;
+            ap.alpha = Math.random() * 0.5;
+            (ap as any).vx = (Math.random() - 0.5) * 0.5;
+            (ap as any).vy = (Math.random() - 0.5) * 0.5;
+            this.ambientParticles.push(ap);
+            this.layers.bg.addChild(ap);
+        }
+
+        // ── Vignette ──
+        this.vignette = new PIXI.Graphics();
+        this.drawVignette();
+        // Skip vignette on mobile for better performance
+        if (window.innerWidth > 600) {
+            this.app.stage.addChild(this.vignette);
+        }
+
+        // ── Scanlines ──
+        const slg = new PIXI.Graphics()
+            .rect(0, 0, 100, 4)
+            .fill({ color: 0x000000, alpha: 0.2 });
+        const scanlineTex = this.app.renderer.generateTexture(slg);
+        slg.destroy();
+
+        this.scanlineSprite = new PIXI.TilingSprite({
+            texture: scanlineTex,
+            width: window.innerWidth,
+            height: window.innerHeight,
+        });
+        this.scanlineSprite.alpha = 0.5;
+        // Only add scanlines on desktop to save GPU power on mobile
+        if (window.innerWidth > 600) {
+            this.app.stage.addChild(this.scanlineSprite);
+        }
+
+        // 1. Circle Texture
         const pg = new PIXI.Graphics().circle(0, 0, GAME_CONFIG.PARTICLE_SIZE).fill(0xffffff);
-        this.particleTexture = this.app.renderer.generateTexture(pg);
+        this.particleTextures[0] = this.app.renderer.generateTexture(pg);
         pg.destroy();
+
+        // 2. Spark/Line Texture
+        const sg = new PIXI.Graphics()
+            .rect(-GAME_CONFIG.PARTICLE_SIZE, -1, GAME_CONFIG.PARTICLE_SIZE * 3, 2)
+            .fill(0xffffff);
+        this.particleTextures[1] = this.app.renderer.generateTexture(sg);
+        sg.destroy();
+
+        // 3. Star/Diamond Texture
+        const stg = new PIXI.Graphics()
+            .poly([0, -5, 2, -2, 5, 0, 2, 2, 0, 5, -2, 2, -5, 0, -2, -2])
+            .fill(0xffffff);
+        this.particleTextures[2] = this.app.renderer.generateTexture(stg);
+        stg.destroy();
+
+        // Shockwave Texture
+        const swg = new PIXI.Graphics()
+            .circle(0, 0, 50)
+            .stroke({ color: 0xffffff, width: 2 });
+        this.shockwaveTexture = this.app.renderer.generateTexture(swg);
+        swg.destroy();
+
+        // Decal Texture (Crater/Burn)
+        const dg = new PIXI.Graphics()
+            .circle(0, 0, 15)
+            .fill({ color: 0x000000, alpha: 0.6 })
+            .circle(0, 0, 8)
+            .fill({ color: 0xff3300, alpha: 0.8 });
+        this.decalTexture = this.app.renderer.generateTexture(dg);
+        dg.destroy();
+
+        // King Aura (Crown) Texture
+        const kag = new PIXI.Graphics()
+            .poly([0, 0, -15, -15, -10, 0, 0, -25, 10, 0, 15, -15, 0, 0]) // Simple crown shape
+            .fill({ color: 0xffd700 })
+            .stroke({ color: 0xffa500, width: 2 });
+        const kingAuraTex = this.app.renderer.generateTexture(kag);
+        kag.destroy();
+        this.kingAuraSprite = new PIXI.Sprite(kingAuraTex);
+        this.kingAuraSprite.anchor.set(0.5, 1); // Anchor at bottom center
+        this.kingAuraSprite.visible = false;
+        this.kingAuraContainer.addChild(this.kingAuraSprite);
 
         const gg = new PIXI.Graphics()
             .circle(0, 0, 50)
@@ -141,7 +282,7 @@ export class Renderer {
                 stroke: { color: 0x000000, width: GAME_CONFIG.FONT_STROKE_WIDTH },
             },
             chars: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.:/ ",
-            resolution: 1,
+            resolution: window.devicePixelRatio || 1,
         });
 
         PIXI.BitmapFont.install({
@@ -154,7 +295,7 @@ export class Renderer {
                 stroke: { color: 0x000000, width: GAME_CONFIG.FONT_STROKE_WIDTH },
             },
             chars: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.:/ _-",
-            resolution: 1,
+            resolution: window.devicePixelRatio || 1,
         });
 
         PIXI.BitmapFont.install({
@@ -167,7 +308,7 @@ export class Renderer {
                 stroke: { color: 0x000000, width: GAME_CONFIG.FONT_STROKE_WIDTH },
             },
             chars: "FPS:0123456789 ",
-            resolution: 1,
+            resolution: window.devicePixelRatio || 1,
         });
 
         this.fpsText = new PIXI.BitmapText({
@@ -181,18 +322,53 @@ export class Renderer {
         this.setupHUDLayout();
 
         // Pre-allocate particles to avoid frame spikes
-        for (let i = 0; i < 500; i++) {
-            const s = new PIXI.Sprite(this.particleTexture!);
+        for (let i = 0; i < 2000; i++) {
+            const s = new PIXI.Sprite(this.particleTextures[0]);
             s.anchor.set(0.5);
             s.visible = false;
             this.particleContainer.addChild(s);
             this.particlePool.push(s);
+        }
+
+        // Pre-allocate shockwaves
+        for (let i = 0; i < 20; i++) {
+            const s = new PIXI.Sprite(this.shockwaveTexture!);
+            s.anchor.set(0.5);
+            s.visible = false;
+            this.shockwaveContainer.addChild(s);
+            this.shockwavePool.push(s);
+        }
+
+        // Pre-allocate decals
+        for (let i = 0; i < 100; i++) {
+            const s = new PIXI.Sprite(this.decalTexture!);
+            s.anchor.set(0.5);
+            s.visible = false;
+            this.decalContainer.addChild(s);
+            this.decalPool.push(s);
         }
     }
 
 
     public render(game: Game) {
         if (!this.app.renderer) return;
+
+        // Draw lightnings
+        this.lightningGraphic.clear();
+        for (let i = this.activeLightnings.length - 1; i >= 0; i--) {
+            const l = this.activeLightnings[i];
+            l.life -= 0.15;
+            if (l.life <= 0) {
+                this.activeLightnings.splice(i, 1);
+            } else {
+                this.lightningGraphic.stroke({ width: 4, color: 0xffffff, alpha: l.life });
+                this.lightningGraphic.moveTo(l.x1, l.y1);
+                const midX = (l.x1 + l.x2) / 2 + (Math.random() - 0.5) * 40;
+                const midY = (l.y1 + l.y2) / 2 + (Math.random() - 0.5) * 40;
+                this.lightningGraphic.lineTo(midX, midY);
+                this.lightningGraphic.lineTo(l.x2, l.y2);
+            }
+        }
 
         // Arena: only redraw when arena dimensions actually changed
         this.drawArena(game.arenaX, game.arenaY, game.arenaW, game.arenaH);
@@ -210,6 +386,12 @@ export class Renderer {
                 // O(1) lookup via tiktokUsers map rather than building a new Set
                 if (!game.tiktokUsers.has(id)) {
                     this.layers.players.removeChild(cache.view);
+                    
+                    // CRITICAL: Explicitly destroy the avatar texture to prevent global PIXI cache leak
+                    if (cache.avatarSprite && cache.avatarSprite.texture) {
+                        cache.avatarSprite.texture.destroy(true); 
+                    }
+                    
                     cache.view.destroy({ children: true });
                     this.viewCache.delete(id);
                 }
@@ -225,7 +407,137 @@ export class Renderer {
         }
 
         this.updateParticles();
+        this.updateShockwaves();
+        this.updateDecals();
+        this.updateFlash();
+        this.animateArena();
+        this.updateKingAura(game);
+
+        if (this.scanlineSprite) {
+            this.scanlineSprite.tilePosition.y += 0.5; // Moving scanlines
+        }
         if (this.fpsText) this.fpsText.text = `FPS: ${game.fps}`;
+    }
+
+    private animateArena() {
+        // Animate Grid
+        if (this.gridSprite) {
+            this.gridSprite.tilePosition.x -= GAME_CONFIG.GRID_SPEED;
+            this.gridSprite.tilePosition.y -= GAME_CONFIG.GRID_SPEED * 0.5;
+            // Pulsing grid alpha
+            this.gridSprite.alpha = GAME_CONFIG.GRID_ALPHA + Math.sin(Date.now() / 1000) * 0.05;
+        }
+
+        // Animate Ambient Particles
+        for (const ap of this.ambientParticles) {
+            ap.x += (ap as any).vx;
+            ap.y += (ap as any).vy;
+            if (ap.x < 0) ap.x = window.innerWidth;
+            if (ap.x > window.innerWidth) ap.x = 0;
+            if (ap.y < 0) ap.y = window.innerHeight;
+            if (ap.y > window.innerHeight) ap.y = 0;
+        }
+    }
+
+    public triggerLightning(fromX: number, fromY: number, toX: number, toY: number) {
+        this.activeLightnings.push({
+            x1: fromX, y1: fromY, x2: toX, y2: toY, life: 1.0
+        });
+        
+        // Flash screen slightly
+        this.triggerFlash(0.1);
+    }
+
+    public triggerFlash(intensity: number = 0.2) {
+        this.flashLife = intensity;
+    }
+
+    public triggerShockwave(x: number, y: number) {
+        // Find an inactive sprite from the pool
+        const sprite = this.shockwavePool.find(s => !s.visible);
+        if (sprite) {
+            sprite.visible = true;
+            sprite.x = x;
+            sprite.y = y;
+            sprite.scale.set(0.1);
+            sprite.alpha = 0.8;
+            this.activeShockwaves.push({ sprite, life: 1.0 });
+        }
+    }
+
+    private updateFlash() {
+        if (this.flashLife <= 0) {
+            if (this.flashOverlay.visible) this.flashOverlay.visible = false;
+            return;
+        }
+
+        this.flashOverlay.visible = true;
+        this.flashOverlay.clear();
+        this.flashOverlay
+            .rect(0, 0, window.innerWidth, window.innerHeight)
+            .fill({ color: 0xffffff, alpha: this.flashLife * 0.3 });
+        
+        this.flashLife -= GAME_CONFIG.FLASH_DECAY;
+    }
+
+    private updateShockwaves() {
+        for (let i = this.activeShockwaves.length - 1; i >= 0; i--) {
+            const sw = this.activeShockwaves[i];
+            sw.life -= GAME_CONFIG.SHOCKWAVE_DECAY;
+            
+            if (sw.life <= 0) {
+                sw.sprite.visible = false;
+                this.activeShockwaves.splice(i, 1);
+            } else {
+                sw.sprite.scale.set(sw.sprite.scale.x + GAME_CONFIG.SHOCKWAVE_GROWTH / 50);
+                sw.sprite.alpha = sw.life;
+            }
+        }
+    }
+
+    public drawDecal(x: number, y: number) {
+        const sprite = this.decalPool.find(s => !s.visible);
+        if (sprite) {
+            sprite.visible = true;
+            sprite.x = x;
+            sprite.y = y;
+            sprite.scale.set(0.5 + Math.random() * 0.5);
+            sprite.rotation = Math.random() * Math.PI * 2;
+            sprite.alpha = 0.8;
+            this.activeDecals.push({ sprite, life: 1.0 });
+        }
+    }
+
+    private updateDecals() {
+        for (let i = this.activeDecals.length - 1; i >= 0; i--) {
+            const dec = this.activeDecals[i];
+            dec.life -= 0.002; // Fade very slowly
+            if (dec.life <= 0) {
+                dec.sprite.visible = false;
+                this.activeDecals.splice(i, 1);
+            } else {
+                dec.sprite.alpha = dec.life * 0.8; // Max alpha 0.8
+            }
+        }
+    }
+
+    private updateKingAura(game: Game) {
+        if (!this.kingAuraSprite || !game.currentKingId) {
+            if (this.kingAuraSprite) this.kingAuraSprite.visible = false;
+            return;
+        }
+        const king = game.players.find(p => p.id === game.currentKingId);
+        if (king && !king.isDead) {
+            this.kingAuraSprite.visible = true;
+            this.kingAuraSprite.x = king.body.position.x;
+            // Float above head
+            const bob = Math.sin(Date.now() / 200) * 5;
+            this.kingAuraSprite.y = king.body.position.y - king.radius - 25 + bob;
+            this.kingAuraSprite.scale.set(king.radius / 35 * (1 + Math.sin(Date.now() / 400) * 0.1));
+            this.kingAuraSprite.alpha = 0.9 + Math.sin(Date.now() / 300) * 0.1;
+        } else {
+            this.kingAuraSprite.visible = false;
+        }
     }
 
     private updatePlayerView(player: Player) {
@@ -252,6 +564,8 @@ export class Renderer {
             let avatarSprite: PIXI.Sprite | null = null;
             if (player.avatarImg) {
                 const texture = PIXI.Texture.from(player.avatarImg);
+                // Ensure high quality scaling for avatars
+                texture.source.scaleMode = 'linear';
                 avatarSprite = new PIXI.Sprite(texture);
                 avatarSprite.anchor.set(0.5);
                 avatarSprite.width = player.radius * 2;
@@ -262,22 +576,28 @@ export class Renderer {
             // BitmapText: no per-update canvas redraws, single texture atlas for all chars
             const hpText = new PIXI.BitmapText({
                 text: String(Math.ceil(player.hp)),
-                style: { fontFamily: "OrbitronHUD", fontSize: GAME_CONFIG.FONT_SIZE_HUD },
+                style: { 
+                    fontFamily: "OrbitronHUD", 
+                    fontSize: window.innerWidth < 600 ? 11 : GAME_CONFIG.FONT_SIZE_HUD 
+                },
             });
             hpText.anchor.set(0.5);
 
             const nameText = new PIXI.BitmapText({
                 text: player.id.toUpperCase(),
-                style: { fontFamily: "OrbitronName", fontSize: GAME_CONFIG.FONT_SIZE_NAME },
+                style: { 
+                    fontFamily: "OrbitronName", 
+                    fontSize: window.innerWidth < 600 ? 10 : GAME_CONFIG.FONT_SIZE_NAME // Responsive font size
+                },
             });
             nameText.anchor.set(0.5);
-            nameText.y = -player.radius - GAME_CONFIG.NAME_LABEL_OFFSET;
+            nameText.y = -player.radius - (window.innerWidth < 600 ? 10 : GAME_CONFIG.NAME_LABEL_OFFSET);
 
             const swordContainer = new PIXI.Container();
 
             bodyGroup.addChild(swordContainer);
-            bodyGroup.addChild(glow);
-            bodyGroup.addChild(avatarContainer);
+            bodyGroup.addChild(avatarContainer); // Avatar below
+            bodyGroup.addChild(glow); // Border on TOP
             hudGroup.addChild(hpText);
             hudGroup.addChild(nameText);
             view.addChild(bodyGroup);
@@ -310,17 +630,64 @@ export class Renderer {
         cache.view.position.set(player.body.position.x, player.body.position.y);
         cache.bodyGroup.rotation = player.body.angle;
 
-        // Glow tint
-        let tint = GAME_CONFIG.ARENA_COLOR;
-        if (player.isHit) tint = 0xff0000;
-        else if ((player as any).healFlashTimer > 0) tint = 0x00ff00;
-        cache.glow.tint = tint;
+        // ── 1. PRESTIGE TIER COLOR & GLOW ───────────────────────────────────
+        let glowTint = GAME_CONFIG.ARENA_COLOR;
+        let glowAlpha = 1.0;
+        let glowScaleMultiplier = 1.0;
+        let blendMode: PIXI.BLEND_MODES = 'normal';
 
-        // Only update sizes when radius actually changes (grow events are rare)
+        if (player.isLegendary) {
+            // RAINBOW PULSE (Legendary)
+            const t = Date.now() / 500;
+            const r = Math.sin(t) * 127 + 128;
+            const g = Math.sin(t + 2) * 127 + 128;
+            const b = Math.sin(t + 4) * 127 + 128;
+            glowTint = (r << 16) | (g << 8) | b;
+            glowScaleMultiplier = 1.2 + Math.sin(Date.now() / 150) * 0.15;
+            blendMode = 'add';
+        } else if (player.isEpic) {
+            // PURPLE PULSE (Epic)
+            glowTint = 0xff00ff;
+            glowAlpha = 0.8 + Math.sin(Date.now() / 200) * 0.2;
+            glowScaleMultiplier = 1.1 + Math.sin(Date.now() / 300) * 0.05;
+            blendMode = 'add';
+        } else if (player.isElite) {
+            // CYAN GLOW (Elite)
+            glowTint = 0x00e5ff;
+            glowAlpha = 0.9;
+            glowScaleMultiplier = 1.05;
+        }
+
+        // ── 2. HP-BASED STATE OVERRIDES ──────────────────────────────────────
+        const isCritical = player.hp < 5; // Low absolute HP
+        
+        if (player.isHit) {
+            glowTint = 0xff0000;
+            glowAlpha = 1.0;
+        } else if (isCritical) {
+            // CRITICAL: Red Flickering
+            if (Math.floor(Date.now() / 100) % 2 === 0) {
+                glowTint = 0xff0000;
+                glowAlpha = 1.0;
+            } else {
+                glowAlpha = 0.2;
+            }
+        } else if (player.hp > 100) {
+            // OVERPOWERED: Brighter additive glow
+            blendMode = 'add';
+            glowAlpha = 1.0;
+        }
+
+        cache.glow.tint = glowTint;
+        cache.glow.alpha = glowAlpha;
+        cache.glow.blendMode = blendMode;
+
+        // Only update sizes when radius actually changes or for pulsing
+        const targetGlowSize = (player.radius + (player.isLegendary ? 15 : 10)) * 2 * glowScaleMultiplier;
+        cache.glow.width = cache.glow.height = targetGlowSize;
+
         if (cache.lastRadius !== player.radius) {
             cache.lastRadius = player.radius;
-
-            cache.glow.width = cache.glow.height = player.radius * 2;
 
             if (cache.avatarSprite) {
                 cache.avatarSprite.width = player.radius * 2;
@@ -379,6 +746,25 @@ export class Renderer {
             sprite.visible = isActive;
 
             if (isActive) {
+                // Prestige Sword Colors
+                if (player.isLegendary) {
+                    sprite.tint = 0xffffff; // Pure white glow (Legendary)
+                    sprite.blendMode = 'add';
+                    sprite.alpha = 0.8 + Math.sin(Date.now() / 100) * 0.2;
+                } else if (player.isEpic) {
+                    sprite.tint = 0xff00ff; // Neon magenta (Epic)
+                    sprite.blendMode = 'add';
+                    sprite.alpha = 1.0;
+                } else if (player.isElite) {
+                    sprite.tint = 0x00e5ff; // Cyan (Elite)
+                    sprite.blendMode = 'add';
+                    sprite.alpha = 1.0;
+                } else {
+                    sprite.tint = 0xffffff;
+                    sprite.blendMode = 'normal';
+                    sprite.alpha = 1.0;
+                }
+
                 sprite.position.set(localPositions[i].x, localPositions[i].y);
                 sprite.rotation = localAngles[i];
 
@@ -399,11 +785,14 @@ export class Renderer {
         const count = ents.length;
 
         // Ensure pool is large enough
-        while (this.particlePool.length < count) {
-            const s = new PIXI.Sprite(this.particleTexture!);
-            s.anchor.set(0.5);
-            this.particleContainer.addChild(s);
-            this.particlePool.push(s);
+        if (this.particlePool.length < count) {
+            const needed = count - this.particlePool.length;
+            for(let i=0; i<needed; i++) {
+                const s = new PIXI.Sprite(this.particleTextures[0]);
+                s.anchor.set(0.5);
+                this.particleContainer.addChild(s);
+                this.particlePool.push(s);
+            }
         }
 
         // Hot path: Only loop through what is necessary
@@ -414,105 +803,32 @@ export class Renderer {
                 s.visible = true;
                 s.x = Position.x[eid];
                 s.y = Position.y[eid];
-                s.alpha = ParticleState.life[eid] / ParticleState.maxLife[eid];
+                
+                const lifePct = ParticleState.life[eid] / ParticleState.maxLife[eid];
+                s.alpha = lifePct;
                 s.tint = PARTICLE_COLOR_LUT[ParticleState.colorId[eid]] ?? 0xffffff;
+                
+                // New visual properties
+                const type = ParticleState.typeId[eid];
+                s.texture = this.particleTextures[type] || this.particleTextures[0];
+                s.rotation = ParticleState.rotation[eid];
+                s.scale.set(ParticleState.scale[eid] * lifePct);
+
+                // Add additive blending for premium look
+                s.blendMode = 'add';
             } else {
-                if (s.visible) s.visible = false; // Only set if state changes
-                else break; // Since we fill pool sequentially, we can break early
+                if (s.visible) s.visible = false; 
+                else break; 
             }
         }
     }
 
     private setupHUDLayout() {
-        const margin = 20;
-        
-        // Leaderboard (Top Right)
-        this.leaderboardContainer.x = window.innerWidth - 300;
-        this.leaderboardContainer.y = margin;
-        
-        const lbTitle = new PIXI.BitmapText({
-            text: "TOP WARRIORS",
-            style: { fontFamily: "OrbitronHUD", fontSize: 24, fill: 0xffcc00 }
-        });
-        this.leaderboardContainer.addChild(lbTitle);
-
-        for (let i = 0; i < 5; i++) {
-            const line = new PIXI.BitmapText({
-                text: "",
-                style: { fontFamily: "OrbitronHUD", fontSize: 18 }
-            });
-            line.y = 40 + i * 25;
-            this.lbLines.push(line);
-            this.leaderboardContainer.addChild(line);
-        }
-
-        // Queue (Bottom Left)
-        this.queueContainer.x = margin;
-        this.queueContainer.y = window.innerHeight - 180;
-
-        const qTitle = new PIXI.BitmapText({
-            text: "WAITING LIST",
-            style: { fontFamily: "OrbitronHUD", fontSize: 20, fill: 0x00e5ff }
-        });
-        this.queueContainer.addChild(qTitle);
-
-        for (let i = 0; i < 5; i++) {
-            const line = new PIXI.BitmapText({
-                text: "",
-                style: { fontFamily: "OrbitronHUD", fontSize: 16 }
-            });
-            line.y = 30 + i * 22;
-            this.qLines.push(line);
-            this.queueContainer.addChild(line);
-        }
+        // Disabled: HUD is now handled by React
     }
 
-    public updateHUD(game: Game) {
-        // Sort top-5 without copying the whole array (insertion sort over small slice)
-        const players = game.players;
-        const topPlayers: typeof players = [];
-        for (let i = 0; i < players.length; i++) {
-            const p = players[i];
-            // Insertion-sort into topPlayers (max 5 entries, extremely cheap)
-            let inserted = false;
-            for (let j = 0; j < topPlayers.length; j++) {
-                if (p.hp > topPlayers[j].hp) {
-                    topPlayers.splice(j, 0, p);
-                    if (topPlayers.length > 5) topPlayers.pop();
-                    inserted = true;
-                    break;
-                }
-            }
-            if (!inserted && topPlayers.length < 5) topPlayers.push(p);
-        }
-
-        for (let i = 0; i < 5; i++) {
-            const line = this.lbLines[i];
-            const p = topPlayers[i];
-            if (p) {
-                line.text = `${i + 1}. ${p.id.toUpperCase()} - HP:${Math.ceil(p.hp)}`;
-                line.visible = true;
-            } else {
-                line.visible = false;
-            }
-        }
-
-        // Update Queue
-        const q = game.queue;
-        for (let i = 0; i < 5; i++) {
-            const line = this.qLines[i];
-            const entry = q[i];
-            if (entry) {
-                line.text = `NEXT: ${entry.name.toUpperCase()}`;
-                line.visible = true;
-            } else {
-                line.visible = false;
-            }
-        }
-
-        // Auto-reposition on window size change (lazy check)
-        this.leaderboardContainer.x = window.innerWidth - 300;
-        this.queueContainer.y = window.innerHeight - 180;
+    public updateHUD() {
+        // HUD is now handled by React in main.tsx
     }
 
     public drawArena(x: number, y: number, w: number, h: number) {
@@ -521,10 +837,36 @@ export class Renderer {
         if (key === this.lastArenaKey) return;
         this.lastArenaKey = key;
 
+        // Draw Main Border
         this.arenaGraphic.clear();
         this.arenaGraphic
             .rect(x, y, w, h)
             .stroke({ width: GAME_CONFIG.ARENA_STROKE, color: GAME_CONFIG.ARENA_COLOR });
+
+        // Draw Neon Glow Border
+        this.arenaGlowGraphic.clear();
+        this.arenaGlowGraphic
+            .rect(x - 2, y - 2, w + 4, h + 4)
+            .stroke({ 
+                width: GAME_CONFIG.ARENA_STROKE * 3, 
+                color: GAME_CONFIG.ARENA_COLOR, 
+                alpha: 0.3 
+            });
+    }
+
+    private drawVignette() {
+        if (!this.vignette) return;
+        const w = window.innerWidth;
+        const h = window.innerHeight;
+        this.vignette.clear();
+        
+        // Very subtle dark vignette for cinematic feel
+        this.vignette.fill({ color: 0x000000, alpha: 0.1 });
+        this.vignette.rect(0, 0, w, h);
+        
+        // Simple radial cut (not a true gradient, but gives the focus effect in PIXI)
+        // For a better vignette we'd use a sprite/texture, but Graphics is faster to implement now
+        // We'll just leave it as a slight darkening overlay for now or skip if too complex without assets
     }
 
     clear() {}

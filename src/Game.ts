@@ -40,10 +40,20 @@ export class Game {
     userData: Map<string, any> = new Map(); // Store profile pictures for auto-respawn
     pendingSpawns: Set<string> = new Set(); // Prevent duplicate spawn calls
     shakeAmount: number = 0;
-    queue: { avatarUrl: string; name: string }[] = [];
+    physicsAccumulator: number = 0; // Fixed timestep accumulator
+    queue: {
+        avatarUrl: string;
+        name: string;
+        isPriority?: boolean;
+        bonusHp?: number;
+    }[] = [];
+    pendingBonusHp: Map<string, number> = new Map(); // Store gift HP while image is loading
     respawnCooldowns: Map<string, number> = new Map();
     playerPool: Player[] = [];
+    winnersHistory: { name: string; avatarUrl: string | null }[] = [];
+    currentKingId: string | null = null;
     readonly MAX_PLAYERS = GAME_CONFIG.MAX_PLAYERS;
+    hasHadMultiplePlayers: boolean = false; // New flag to prevent instant victory
 
     bgmPlaylist = GAME_CONFIG.BGM_PLAYLIST;
     currentBgmIndex: number = 0;
@@ -54,18 +64,18 @@ export class Game {
     private lastFpsUpdate: number = 0;
     private spatialHash!: SpatialHash;
     private queryBuffer: Uint32Array = new Uint32Array(512); // Pre-allocated buffer for search
-    
+
     // Performance Tracking
-    private perfHistory: { 
-        t: number, 
-        fps: number, 
-        dt: number,
-        physics: number,
-        logic: number,
-        render: number,
-        mem?: number,
-        players: number, 
-        particles: number 
+    private perfHistory: {
+        t: number;
+        fps: number;
+        dt: number;
+        physics: number;
+        logic: number;
+        render: number;
+        mem?: number;
+        players: number;
+        particles: number;
     }[] = [];
     private maxPerfEntries: number = 5000;
     private frameCounter: number = 0;
@@ -87,6 +97,7 @@ export class Game {
                 this.assetsLoaded = true;
                 this.avatarImgs = avatarImgs;
                 this.knifeImg = knifeImg;
+                this.initArena(); // Re-init arena after renderer is ready and dimensions are stable
                 this.lastTime = performance.now();
                 this.setupCollisionEvents();
                 requestAnimationFrame((t) => this.loop(t));
@@ -96,10 +107,14 @@ export class Game {
 
     initArena() {
         const padding = GAME_CONFIG.ARENA_MARGIN;
+        const isPortrait = window.innerHeight > window.innerWidth;
+
+        const topBarHeight = isPortrait ? 50 : 85;
+        const sidebarWidth = isPortrait ? 0 : window.innerWidth * 0.25;
         this.arenaX = padding;
-        this.arenaY = padding;
-        this.arenaW = this.canvas.width - padding * 2;
-        this.arenaH = this.canvas.height - padding * 2;
+        this.arenaY = topBarHeight; // Removed top padding to close the gap
+        this.arenaW = window.innerWidth - sidebarWidth - padding * 2;
+        this.arenaH = window.innerHeight - topBarHeight - padding; // Adjusted height accordingly
 
         const { obstacles } = createArena(
             this.world,
@@ -220,9 +235,14 @@ export class Game {
                 x: Math.cos(angle) * force,
                 y: Math.sin(angle) * force,
             });
-            
+
             this.shakeAmount = Math.max(this.shakeAmount, 2);
-            for(let i=0; i<2; i++) createParticle(player.body.position.x, player.body.position.y, 1);
+            for (let i = 0; i < 2; i++)
+                createParticle(
+                    player.body.position.x,
+                    player.body.position.y,
+                    1,
+                );
         } else {
             this.queueSpawn(data.profilePictureUrl, userId);
         }
@@ -242,58 +262,91 @@ export class Game {
     onTikTokGift(data: any) {
         const userId = data.uniqueId;
         let player = this.tiktokUsers.get(userId);
+        const diamonds = data.diamondCount || 1;
+        const giftBonusHp = diamonds * GAME_CONFIG.GIFT_HP_BONUS;
 
         if (!player || player.isDead) {
-            this.queueSpawn(data.profilePictureUrl, userId);
-            player = this.tiktokUsers.get(userId);
+            // VIP JOIN: If room for VIPs, spawn immediately
+            if (
+                this.players.length + this.pendingSpawns.size <
+                GAME_CONFIG.VIP_MAX_PLAYERS
+            ) {
+                this.spawnNewPlayer(
+                    data.profilePictureUrl,
+                    userId,
+                    giftBonusHp,
+                );
+            } else {
+                this.queueSpawn(
+                    data.profilePictureUrl,
+                    userId,
+                    true,
+                    giftBonusHp,
+                );
+            }
+            return; // No player object yet, handled by spawn/queue
         }
 
-        if (player && !player.isDead) {
-            const diamonds = data.diamondCount || 1;
-            
-            // BRUTAL GIFT: Explosive effects
-            player.hp += diamonds * GAME_CONFIG.GIFT_HP_BONUS;
-            player.grow(1 + 0.05 * Math.log10(diamonds + 1)); // Logarithmic growth to avoid infinite size too fast
-            
-            // Multiple swords for bigger gifts
-            const swordsToAdd = Math.min(5, Math.ceil(diamonds / 5));
-            for(let i=0; i<swordsToAdd; i++) player.addSword();
+        // Existing player logic
+        player.hp = Math.min(
+            GAME_CONFIG.MAX_PLAYER_HP,
+            player.hp + giftBonusHp,
+        );
+        player.grow(1 + 0.05 * Math.log10(diamonds + 1));
 
-            // Massive particle explosion
-            const particleCount = Math.min(50, 10 + diamonds);
-            for (let i = 0; i < particleCount; i++) {
-                createParticle(player.body.position.x, player.body.position.y, Math.floor(Math.random() * 5));
-            }
+        // Sword count is now handled by syncSwordsToHp() in the loop
 
-            // Screen shake proportional to gift value
-            this.shakeAmount = Math.min(25, this.shakeAmount + 5 + (diamonds * 0.5));
-            
-            // Apply massive radial impulse to nearby players (Optimized via SpatialHash)
-            const pushForce = 0.01 * diamonds;
-            const queryRadius = 300;
-            const foundCount = this.spatialHash.query(
+        // Screen Shake & Effects
+        this.shakeAmount = Math.min(20, this.shakeAmount + diamonds * 0.1);
+        this.renderer.triggerShockwave(
+            player.body.position.x,
+            player.body.position.y,
+        );
+
+        // Particle explosion on gift — hard cap at 15 to prevent spikes
+        const particleCount = Math.min(15, 3 + Math.floor(diamonds / 5));
+        for (let i = 0; i < particleCount; i++) {
+            const type = Math.random() > 0.7 ? 2 : Math.random() > 0.4 ? 1 : 0;
+            const colorIdx = Math.floor(Math.random() * 5);
+            createParticle(
                 player.body.position.x,
                 player.body.position.y,
-                queryRadius,
-                this.queryBuffer
+                colorIdx,
+                type,
             );
+        }
 
-            for (let i = 0; i < foundCount; i++) {
-                const otherIdx = this.queryBuffer[i];
-                const p = this.players[otherIdx];
-                
-                if (!p || p === player || p.isDead) continue;
-                
-                const dx = p.body.position.x - player.body.position.x;
-                const dy = p.body.position.y - player.body.position.y;
-                const dist = Math.sqrt(dx*dx + dy*dy);
-                
-                if (dist > 0 && dist < queryRadius) {
-                    Body.applyForce(p.body, p.body.position, {
-                        x: (dx/dist) * pushForce,
-                        y: (dy/dist) * pushForce
-                    });
-                }
+        // Visual shockwave and Screen flash
+        this.renderer.triggerShockwave(
+            player.body.position.x,
+            player.body.position.y,
+        );
+
+        // Apply massive radial impulse to nearby players (Optimized via SpatialHash)
+        const pushForce = 0.01 * diamonds;
+        const queryRadius = 300;
+        const foundCount = this.spatialHash.query(
+            player.body.position.x,
+            player.body.position.y,
+            queryRadius,
+            this.queryBuffer,
+        );
+
+        for (let i = 0; i < foundCount; i++) {
+            const otherIdx = this.queryBuffer[i];
+            const p = this.players[otherIdx];
+
+            if (!p || p === player || p.isDead) continue;
+
+            const dx = p.body.position.x - player.body.position.x;
+            const dy = p.body.position.y - player.body.position.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+
+            if (dist > 0 && dist < queryRadius) {
+                Body.applyForce(p.body, p.body.position, {
+                    x: (dx / dist) * pushForce,
+                    y: (dy / dist) * pushForce,
+                });
             }
         }
     }
@@ -321,28 +374,75 @@ export class Game {
         });
     }
 
-    queueSpawn(avatarUrl: string, name: string) {
+    queueSpawn(
+        avatarUrl: string,
+        name: string,
+        isPriority: boolean = false,
+        bonusHp: number = 0,
+    ) {
         // Prevent duplicate queue entries or spawning if already alive/pending
-        if (this.pendingSpawns.has(name)) return;
-        if (this.tiktokUsers.has(name) && !this.tiktokUsers.get(name)?.isDead) return;
-        if (this.queue.some(q => q.name === name)) return;
+        if (this.pendingSpawns.has(name)) {
+            // Already loading, add to pending bonus HP
+            const current = this.pendingBonusHp.get(name) || 0;
+            this.pendingBonusHp.set(name, current + bonusHp);
+            return;
+        }
+        if (this.tiktokUsers.has(name) && !this.tiktokUsers.get(name)?.isDead)
+            return;
 
-        this.queue.push({ avatarUrl, name });
+        // Priority & Bonus Logic: If already in queue, update their data
+        const existingIdx = this.queue.findIndex((q) => q.name === name);
+        if (existingIdx !== -1) {
+            const item = this.queue[existingIdx];
+            item.bonusHp = (item.bonusHp || 0) + bonusHp;
+            if (isPriority) {
+                item.isPriority = true;
+                this.queue.splice(existingIdx, 1);
+                this.queue.unshift(item); // Move to front
+            }
+            return;
+        }
+
+        if (isPriority) {
+            this.queue.unshift({ avatarUrl, name, isPriority: true, bonusHp });
+        } else {
+            this.queue.push({ avatarUrl, name, isPriority: false, bonusHp });
+        }
     }
 
-    async spawnNewPlayer(avatarUrl: string, name: string) {
-        if (this.pendingSpawns.has(name)) return;
-        if (this.tiktokUsers.has(name) && !this.tiktokUsers.get(name)?.isDead) return;
+    private applyExplosionImpulse(
+        x: number,
+        y: number,
+        radius: number,
+        force: number,
+    ) {
+        const foundCount = this.spatialHash.query(
+            x,
+            y,
+            radius,
+            this.queryBuffer,
+        );
+        for (let i = 0; i < foundCount; i++) {
+            const p = this.players[this.queryBuffer[i]];
+            if (!p || p.isDead) continue;
 
-        this.pendingSpawns.add(name);
+            const dx = p.body.position.x - x;
+            const dy = p.body.position.y - y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
 
-        let newPlayer: Player;
-        const x = this.arenaX + Math.random() * this.arenaW;
-        const y = this.arenaY + Math.random() * this.arenaH;
+            if (dist > 0 && dist < radius) {
+                Body.applyForce(p.body, p.body.position, {
+                    x: (dx / dist) * force,
+                    y: (dy / dist) * force,
+                });
+            }
+        }
+    }
 
+    async loadProfileImage(url: string): Promise<HTMLImageElement> {
         const img = new Image();
         img.crossOrigin = "anonymous";
-        img.src = avatarUrl;
+        img.src = url;
 
         await Promise.race([
             new Promise((resolve) => {
@@ -352,36 +452,76 @@ export class Game {
             new Promise((resolve) => setTimeout(resolve, 3000)),
         ]);
 
-        const avatarToUse = img.complete
+        return img.complete
             ? img
-            : this.avatarImgs[Math.floor(Math.random() * this.avatarImgs.length)];
+            : this.avatarImgs[
+                  Math.floor(Math.random() * this.avatarImgs.length)
+              ];
+    }
 
-        // REUSE FROM POOL OR CREATE NEW
-        if (this.playerPool.length > 0) {
-            newPlayer = this.playerPool.pop()!;
-            newPlayer.reset(x, y, name.substring(0, 8), avatarToUse);
-            World.add(this.world, newPlayer.body); // Put back into physics world
-        } else {
-            const r = GAME_CONFIG.PLAYER_RADIUS;
-            newPlayer = new Player(
-                this.world,
-                x,
-                y,
-                r,
-                name.substring(0, 8),
-                avatarToUse,
-                this.knifeImg,
-            );
+    async spawnNewPlayer(avatarUrl: string, name: string, bonusHp: number = 0) {
+        if (this.pendingSpawns.has(name)) return;
+        this.pendingSpawns.add(name);
+        if (bonusHp > 0) this.pendingBonusHp.set(name, bonusHp);
+
+        try {
+            const avatarToUse = await this.loadProfileImage(avatarUrl);
+
+            // Re-check bonus in case more gifts came while loading
+            const finalBonus = this.pendingBonusHp.get(name) || 0;
+            this.pendingBonusHp.delete(name);
+
+            const isPortrait = window.innerHeight > window.innerWidth;
+            const baseRadius = isPortrait ? 25 : GAME_CONFIG.PLAYER_RADIUS;
+
+            const padding = GAME_CONFIG.SPAWN_MARGIN;
+            const x =
+                this.arenaX +
+                padding +
+                Math.random() * (this.arenaW - padding * 2);
+            const y =
+                this.arenaY +
+                padding +
+                Math.random() * (this.arenaH - padding * 2);
+
+            let newPlayer: Player;
+
+            // REUSE FROM POOL OR CREATE NEW
+            if (this.playerPool.length > 0) {
+                newPlayer = this.playerPool.pop()!;
+                newPlayer.reset(
+                    x,
+                    y,
+                    name.substring(0, 8),
+                    avatarToUse,
+                    baseRadius,
+                );
+                World.add(this.world, newPlayer.body);
+            } else {
+                newPlayer = new Player(
+                    this.world,
+                    x,
+                    y,
+                    baseRadius,
+                    name.substring(0, 8),
+                    avatarToUse,
+                    this.knifeImg,
+                );
+            }
+
+            // Apply Bonus HP
+            newPlayer.hp += finalBonus;
+
+            this.tiktokUsers.set(name, newPlayer);
+            this.players.push(newPlayer);
+            this.registerPlayerBody(newPlayer);
+            newPlayer.applyInitialImpulse();
+        } catch (err) {
+            console.error("Failed to spawn player:", name, err);
+            this.pendingBonusHp.delete(name);
+        } finally {
+            this.pendingSpawns.delete(name);
         }
-
-        newPlayer.tiktokProfileImg = img.complete ? img : null;
-        newPlayer.applyInitialImpulse();
-        
-        this.players.push(newPlayer);
-        this.tiktokUsers.set(name, newPlayer);
-        this.registerPlayerBody(newPlayer);
-        
-        this.pendingSpawns.delete(name);
     }
 
     // O(1) body→player lookup: built once, updated on spawn/death
@@ -413,8 +553,10 @@ export class Game {
 
                 if (!idA || !idB || idA === idB) continue;
 
-                const aIsKnife = bodyA.label === "player-knife" && !bodyA.isSensor;
-                const bIsKnife = bodyB.label === "player-knife" && !bodyB.isSensor;
+                const aIsKnife =
+                    bodyA.label === "player-knife" && !bodyA.isSensor;
+                const bIsKnife =
+                    bodyB.label === "player-knife" && !bodyB.isSensor;
                 const aIsBody = bodyA.label === "player-body";
                 const bIsBody = bodyB.label === "player-body";
 
@@ -422,21 +564,23 @@ export class Game {
                     if (pB.takeDamage()) {
                         if (pA) pA.onHitDealt();
                         this.playHitSfx();
-                        this.createHitEffect(
-                            pair.collision.supports[0]?.x || parentB.position.x,
-                            pair.collision.supports[0]?.y || parentB.position.y,
-                            0,
-                        );
+                        const hx =
+                            pair.collision.supports[0]?.x || parentB.position.x;
+                        const hy =
+                            pair.collision.supports[0]?.y || parentB.position.y;
+                        this.createHitEffect(hx, hy, 0);
+                        this.renderer.drawDecal(hx, hy);
                     }
                 } else if (bIsKnife && aIsBody && pA) {
                     if (pA.takeDamage()) {
                         if (pB) pB.onHitDealt();
                         this.playHitSfx();
-                        this.createHitEffect(
-                            pair.collision.supports[0]?.x || parentA.position.x,
-                            pair.collision.supports[0]?.y || parentA.position.y,
-                            0,
-                        );
+                        const hx =
+                            pair.collision.supports[0]?.x || parentA.position.x;
+                        const hy =
+                            pair.collision.supports[0]?.y || parentA.position.y;
+                        this.createHitEffect(hx, hy, 0);
+                        this.renderer.drawDecal(hx, hy);
                     }
                 }
             }
@@ -511,13 +655,29 @@ export class Game {
     }
 
     reset() {
-        this.players.forEach((p) => p.destroy());
+        this.state = "playing";
+        this.victoryTimer = GAME_CONFIG.VICTORY_TIMER;
+        this.winner = null;
+
+        // Clear all current players correctly
+        for (const player of this.players) {
+            this.unregisterPlayerBody(player);
+            World.remove(this.world, player.body);
+        }
         this.players = [];
         this.tiktokUsers.clear();
-        this.activeMembers.clear();
-        this.userData.clear();
         this.queue = [];
+        this.pendingSpawns.clear();
+
+        // Clear cooldowns so everyone can rejoin
         this.respawnCooldowns.clear();
+
+        // Optional: Periodic aggressive cleanup of persistent maps to prevent multi-day leaks
+        if (this.userData.size > 2000) {
+            this.userData.clear();
+            this.activeMembers.clear();
+        }
+
         this.shakeAmount = 0;
         this.victoryTimer = GAME_CONFIG.VICTORY_TIMER;
         this.restartTimer = 10000;
@@ -528,6 +688,7 @@ export class Game {
         this.initArena();
 
         this.lastTime = performance.now();
+        this.hasHadMultiplePlayers = false; // Reset flag
     }
 
     loop(timestamp: number) {
@@ -554,21 +715,161 @@ export class Game {
             }
             logicTime = performance.now() - startLogic;
         } else {
-            // PHYSICS
+            // ── FIXED TIMESTEP PHYSICS ──────────────────────────────────────────
+            // Always step at exactly 16.67ms. If browser delivers a double-frame
+            // (33ms dt), we run physics TWICE at 16.67ms each instead of once at
+            // 33ms. This completely eliminates speed-burst from V-sync skips.
             const startPhysics = performance.now();
-            Engine.update(this.engine, 1000 / 60);
+            const FIXED_STEP = 1000 / 60; // 16.666ms
+            const MAX_STEPS = 2;          // Never run more than 2 steps to avoid spiral-of-death
+            this.physicsAccumulator += Math.min(delta, 50); // Cap total accumulation
+            let steps = 0;
+            while (this.physicsAccumulator >= FIXED_STEP && steps < MAX_STEPS) {
+                Engine.update(this.engine, FIXED_STEP);
+                this.physicsAccumulator -= FIXED_STEP;
+                steps++;
+            }
+
+            // Clamp velocity to prevent Matter.js runaway acceleration (physics explosion)
+            const maxSpeed = GAME_CONFIG.MAX_SPEED * 1.5;
+            for (const player of this.players) {
+                if (player.isDead) continue;
+                const vel = player.body.velocity;
+                const speed = Math.sqrt(vel.x * vel.x + vel.y * vel.y);
+                if (speed > maxSpeed) {
+                    const scale = maxSpeed / speed;
+                    Body.setVelocity(player.body, { x: vel.x * scale, y: vel.y * scale });
+                }
+            }
             physicsTime = performance.now() - startPhysics;
 
             // LOGIC (AI, ECS, State)
             const startLogic = performance.now();
             const aliveCount = this.players.length;
+            if (aliveCount >= 2) this.hasHadMultiplePlayers = true; // Mark that a real battle happened
+
             let deadFound = false;
             for (let i = 0; i < aliveCount; i++) {
                 const player = this.players[i];
+                if (!player) continue;
+
+                // DYNAMIC PRESTIGE & SIZE BASED ON HP (100% ACCURACY)
+                player.isLegendary =
+                    player.hp >= GAME_CONFIG.PRESTIGE_HP_LEGENDARY;
+                player.isEpic =
+                    !player.isLegendary &&
+                    player.hp >= GAME_CONFIG.PRESTIGE_HP_EPIC;
+                player.isElite =
+                    !player.isLegendary &&
+                    !player.isEpic &&
+                    player.hp >= GAME_CONFIG.PRESTIGE_HP_ELITE;
+
+                const isPortrait = window.innerHeight > window.innerWidth;
+                const baseRadius = isPortrait ? 25 : GAME_CONFIG.PLAYER_RADIUS;
+                player.syncSizeToHp(baseRadius, GAME_CONFIG.MAX_PLAYER_RADIUS);
+                player.syncSwordsToHp();
+
+                // ── SPECIAL SKILL: SHOCKWAVE NOVA ──
+                if (player.isLegendary) {
+                    if (!player.lastSkillTime) player.lastSkillTime = 0;
+                    const now = Date.now();
+
+                    // Skill 1: Shockwave Nova
+                    if (
+                        now - player.lastSkillTime >
+                        GAME_CONFIG.SKILL_SHOCKWAVE_COOLDOWN
+                    ) {
+                        player.lastSkillTime = now;
+                        this.renderer.triggerShockwave(
+                            player.body.position.x,
+                            player.body.position.y,
+                        );
+                        this.applyExplosionImpulse(
+                            player.body.position.x,
+                            player.body.position.y,
+                            GAME_CONFIG.SKILL_SHOCKWAVE_RADIUS,
+                            GAME_CONFIG.SKILL_SHOCKWAVE_FORCE,
+                        );
+                    }
+
+                    // Skill 2: Heavenly Strike (Lightning)
+                    if (!player.lastLightningTime) player.lastLightningTime = 0;
+                    if (
+                        now - player.lastLightningTime >
+                        GAME_CONFIG.SKILL_LIGHTNING_COOLDOWN
+                    ) {
+                        player.lastLightningTime = now;
+                        // MULTI-TARGET CHAIN LIGHTNING
+                        const targets = [];
+                        const queryRadius = GAME_CONFIG.SKILL_LIGHTNING_RADIUS;
+                        const foundCount = this.spatialHash.query(
+                            player.body.position.x,
+                            player.body.position.y,
+                            queryRadius,
+                            this.queryBuffer,
+                        );
+                        for (let j = 0; j < foundCount; j++) {
+                            const other = this.players[this.queryBuffer[j]];
+                            if (!other || other === player || other.isDead)
+                                continue;
+
+                            const dist = Matter.Vector.magnitude(
+                                Matter.Vector.sub(
+                                    other.body.position,
+                                    player.body.position,
+                                ),
+                            );
+                            if (dist < queryRadius) {
+                                targets.push({ player: other, dist });
+                            }
+                        }
+
+                        // Sort by distance and take up to Max Targets
+                        targets.sort((a, b) => a.dist - b.dist);
+                        const targetsToHit = targets.slice(
+                            0,
+                            GAME_CONFIG.SKILL_LIGHTNING_MAX_TARGETS,
+                        );
+
+                        if (targetsToHit.length > 0) {
+                            // Massive camera shake for impact instead of hit stop
+                            this.shakeAmount += 15;
+
+                            for (const t of targetsToHit) {
+                                const target = t.player;
+                                target.hp -= GAME_CONFIG.SKILL_LIGHTNING_DAMAGE;
+                                if (target.hp <= 0) target.isDead = true;
+
+                                this.renderer.triggerLightning(
+                                    player.body.position.x,
+                                    player.body.position.y,
+                                    target.body.position.x,
+                                    target.body.position.y,
+                                );
+                                // Only full effect on death; otherwise cheap flash
+                                if (target.isDead) {
+                                    this.createDeathEffect(
+                                        target.body.position.x,
+                                        target.body.position.y,
+                                    );
+                                } else {
+                                    this.renderer.triggerFlash(0.05);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if (player.isDead) {
                     deadFound = true;
+                    // Trigger Death Explosion!
+                    this.createDeathEffect(
+                        player.body.position.x,
+                        player.body.position.y,
+                    );
+
                     this.unregisterPlayerBody(player);
-                    World.remove(this.world, player.body); 
+                    World.remove(this.world, player.body);
                     this.tiktokUsers.delete(player.id);
                     this.respawnCooldowns.set(
                         player.id,
@@ -580,8 +881,15 @@ export class Game {
                         const data = this.userData.get(player.id);
                         if (data) {
                             setTimeout(() => {
-                                if (this.activeMembers.has(player.id) && (!this.tiktokUsers.get(player.id) || this.tiktokUsers.get(player.id)!.isDead)) {
-                                    this.spawnNewPlayer(data.profilePictureUrl, player.id);
+                                if (
+                                    this.activeMembers.has(player.id) &&
+                                    (!this.tiktokUsers.get(player.id) ||
+                                        this.tiktokUsers.get(player.id)!.isDead)
+                                ) {
+                                    this.spawnNewPlayer(
+                                        data.profilePictureUrl,
+                                        player.id,
+                                    );
                                 }
                             }, 1000);
                         }
@@ -592,12 +900,25 @@ export class Game {
                 this.players = this.players.filter((p) => !p.isDead);
             }
 
-            while (
-                this.players.length + this.pendingSpawns.size < this.MAX_PLAYERS &&
-                this.queue.length > 0
-            ) {
-                const next = this.queue.shift();
-                if (next) this.spawnNewPlayer(next.avatarUrl, next.name);
+            while (this.queue.length > 0) {
+                const next = this.queue[0]; // Peek
+                const currentLimit = next.isPriority
+                    ? GAME_CONFIG.VIP_MAX_PLAYERS
+                    : GAME_CONFIG.MAX_PLAYERS;
+
+                if (
+                    this.players.length + this.pendingSpawns.size <
+                    currentLimit
+                ) {
+                    this.queue.shift();
+                    this.spawnNewPlayer(
+                        next.avatarUrl,
+                        next.name,
+                        next.bonusHp || 0,
+                    );
+                } else {
+                    break; // Room full for the next person in line
+                }
             }
 
             // Logic for particles (reuse query result in perf log below)
@@ -608,6 +929,7 @@ export class Game {
                 Position.x[eid] += Velocity.x[eid];
                 Position.y[eid] += Velocity.y[eid];
                 Velocity.y[eid] += GAME_CONFIG.PARTICLE_GRAVITY;
+                ParticleState.rotation[eid] += ParticleState.vr[eid];
                 ParticleState.life[eid] -= GAME_CONFIG.PARTICLE_DECAY;
                 if (ParticleState.life[eid] <= 0) {
                     removeEntity(world, eid);
@@ -615,34 +937,60 @@ export class Game {
                     particleCount++;
                 }
             }
-            const alivePlayers = this.players; 
+            const alivePlayers = this.players;
             const frameCount = Math.floor(timestamp / 16);
 
             this.spatialHash.clear();
             for (let i = 0; i < alivePlayers.length; i++) {
                 const p = alivePlayers[i];
-                this.spatialHash.insert(i, p.body.position.x, p.body.position.y);
+                this.spatialHash.insert(
+                    i,
+                    p.body.position.x,
+                    p.body.position.y,
+                );
             }
 
             for (let i = 0; i < alivePlayers.length; i++) {
                 const player = alivePlayers[i];
 
+                // ── Boundary Safety Clamp ──
+                // If a player somehow tunnels through a wall (high speed or spawn glitch),
+                // teleport them back to the center of the arena.
+                const pos = player.body.position;
+                const outMargin = 150;
+                if (
+                    pos.x < this.arenaX - outMargin ||
+                    pos.x > this.arenaX + this.arenaW + outMargin ||
+                    pos.y < this.arenaY - outMargin ||
+                    pos.y > this.arenaY + this.arenaH + outMargin
+                ) {
+                    Matter.Body.setPosition(player.body, {
+                        x: this.arenaX + this.arenaW / 2,
+                        y: this.arenaY + this.arenaH / 2,
+                    });
+                    Matter.Body.setVelocity(player.body, { x: 0, y: 0 });
+                }
+
                 let nearestOpponent: Player | null = null;
-                if ((frameCount + i) % 30 === 0) {
+                // Throttle AI targeting even more: only check every 45 frames on mobile
+                const targetThrottle = window.innerWidth < 600 ? 45 : 30;
+                if ((frameCount + i) % targetThrottle === 0) {
                     let minDist = Infinity;
                     const foundCount = this.spatialHash.query(
                         player.body.position.x,
                         player.body.position.y,
-                        300, 
-                        this.queryBuffer
+                        300,
+                        this.queryBuffer,
                     );
 
                     for (let j = 0; j < foundCount; j++) {
                         const otherIdx = this.queryBuffer[j];
                         const other = alivePlayers[otherIdx];
                         if (other === player) continue;
-                        const dx = other.body.position.x - player.body.position.x;
-                        const dy = other.body.position.y - player.body.position.y;
+                        const dx =
+                            other.body.position.x - player.body.position.x;
+                        const dy =
+                            other.body.position.y - player.body.position.y;
                         const dist = dx * dx + dy * dy;
                         if (dist < minDist) {
                             minDist = dist;
@@ -654,8 +1002,10 @@ export class Game {
                         for (let j = 0; j < alivePlayers.length; j++) {
                             const other = alivePlayers[j];
                             if (other === player) continue;
-                            const dx = other.body.position.x - player.body.position.x;
-                            const dy = other.body.position.y - player.body.position.y;
+                            const dx =
+                                other.body.position.x - player.body.position.x;
+                            const dy =
+                                other.body.position.y - player.body.position.y;
                             const dist = dx * dx + dy * dy;
                             if (dist < minDist) {
                                 minDist = dist;
@@ -673,7 +1023,8 @@ export class Game {
                 const margin = GAME_CONFIG.ARENA_MARGIN;
                 const px = player.body.position.x;
                 const py = player.body.position.y;
-                let pushX = 0, pushY = 0;
+                let pushX = 0,
+                    pushY = 0;
                 if (px < this.arenaX - margin) pushX = 1;
                 if (px > this.arenaX + this.arenaW + margin) pushX = -1;
                 if (py < this.arenaY - margin) pushY = 1;
@@ -685,25 +1036,72 @@ export class Game {
                         y: player.body.velocity.y * 0.5 + pushY * pushForce,
                     });
                     Body.setPosition(player.body, {
-                        x: Math.max(this.arenaX, Math.min(this.arenaX + this.arenaW, px)),
-                        y: Math.max(this.arenaY, Math.min(this.arenaY + this.arenaH, py)),
+                        x: Math.max(
+                            this.arenaX,
+                            Math.min(this.arenaX + this.arenaW, px),
+                        ),
+                        y: Math.max(
+                            this.arenaY,
+                            Math.min(this.arenaY + this.arenaH, py),
+                        ),
                     });
                 }
             }
 
-            if (this.players.length === 1) {
-                this.victoryTimer -= delta;
-                if (this.victoryTimer <= 0) {
+            // Determine Current King
+            if (this.players.length > 0 && frameCount % 60 === 0) {
+                const king = [...this.players].sort((a, b) => b.hp - a.hp)[0];
+                this.currentKingId = king.id;
+            }
+
+            // Global Battle Timer: Always count down
+            this.victoryTimer -= delta;
+
+            const minBattleTime = 10000; // 10 seconds grace period
+            const hasEnoughTimePassed =
+                GAME_CONFIG.VICTORY_TIMER - this.victoryTimer > minBattleTime;
+            const noMoreComing =
+                this.queue.length === 0 && this.pendingSpawns.size === 0;
+
+            // Trigger victory only if:
+            // 1. Time is up
+            // 2. OR: 1 player remains AND battle has started (had 2+ players) AND no more players are in queue
+            if (
+                this.victoryTimer <= 0 ||
+                (hasEnoughTimePassed &&
+                    noMoreComing &&
+                    this.players.length === 1 &&
+                    this.hasHadMultiplePlayers)
+            ) {
+                if (this.players.length > 0) {
+                    // Pick the best player as winner (highest HP)
+                    const winner = [...this.players].sort(
+                        (a, b) => b.hp - a.hp,
+                    )[0];
                     this.state = "gameover";
-                    this.winner = this.players[0].id;
+                    this.winner = winner.id;
+
+                    // Add to history
+                    this.winnersHistory.unshift({
+                        name: winner.id,
+                        avatarUrl: winner.avatarImg?.src || null,
+                    });
+                    if (this.winnersHistory.length > 5)
+                        this.winnersHistory.pop();
+                } else if (this.victoryTimer <= 0) {
+                    this.state = "gameover";
+                    this.winner = "NO ONE";
                 }
-            } else if (this.players.length > 1) {
-                this.victoryTimer = GAME_CONFIG.VICTORY_TIMER;
             }
             logicTime = performance.now() - startLogic;
 
             // Cache particle count for perf log (avoids a second ECS query below)
             this._lastParticleCount = particleCount;
+
+            // Periodic Cache Cleanup (Every 10 minutes)
+            if (frameCount % 36000 === 0) {
+                this.cleanUpCaches();
+            }
         }
 
         this.shakeAmount *= 0.9;
@@ -714,10 +1112,12 @@ export class Game {
         this.render();
         renderTime = performance.now() - startRender;
 
-        // Throttled HUD update
+        // Legacy HUD update (Disabled in favor of React HUD)
+        /*
         if (Math.floor(timestamp / 16) % 10 === 0) {
             this.renderer.updateHUD(this);
         }
+        */
 
         // PERFORMANCE LOGGING (Every 5 frames)
         this.frameCounter++;
@@ -730,25 +1130,55 @@ export class Game {
                 physics: parseFloat(physicsTime.toFixed(2)),
                 logic: parseFloat(logicTime.toFixed(2)),
                 render: parseFloat(renderTime.toFixed(2)),
-                mem: memory ? Math.round(memory.usedJSHeapSize / 1048576) : undefined,
+                mem: memory
+                    ? Math.round(memory.usedJSHeapSize / 1048576)
+                    : undefined,
                 players: this.players.length,
-                particles: this._lastParticleCount  // cached — no extra ECS query
+                particles: this._lastParticleCount, // cached — no extra ECS query
             });
-            if (this.perfHistory.length > this.maxPerfEntries) this.perfHistory.shift();
+            if (this.perfHistory.length > this.maxPerfEntries)
+                this.perfHistory.shift();
         }
 
         requestAnimationFrame((t) => this.loop(t));
     }
 
     public downloadPerfLog() {
-        const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(this.perfHistory, null, 2));
-        const downloadAnchorNode = document.createElement('a');
-        downloadAnchorNode.setAttribute("href",     dataStr);
+        const dataStr =
+            "data:text/json;charset=utf-8," +
+            encodeURIComponent(JSON.stringify(this.perfHistory, null, 2));
+        const downloadAnchorNode = document.createElement("a");
+        downloadAnchorNode.setAttribute("href", dataStr);
         downloadAnchorNode.setAttribute("download", "perf_log.json");
         document.body.appendChild(downloadAnchorNode);
         downloadAnchorNode.click();
         downloadAnchorNode.remove();
         console.log("Performance log exported!");
+    }
+
+    private cleanUpCaches() {
+        const now = Date.now();
+        // Clear respawn cooldowns that are long gone
+        for (const [id, time] of this.respawnCooldowns) {
+            if (now > time + 600000) {
+                // 10 minutes old
+                this.respawnCooldowns.delete(id);
+            }
+        }
+
+        // Clear userData/activeMembers for users who haven't been active for a long time
+        // and aren't currently in the game. This prevents the map from growing to 100k+ entries.
+        if (this.userData.size > 1000) {
+            for (const id of this.userData.keys()) {
+                if (
+                    !this.tiktokUsers.has(id) &&
+                    !this.queue.some((q) => q.name === id)
+                ) {
+                    this.userData.delete(id);
+                    this.activeMembers.delete(id);
+                }
+            }
+        }
     }
 
     render() {
@@ -759,8 +1189,24 @@ export class Game {
     createHitEffect(x: number, y: number, colorId: number = 0) {
         this.shakeAmount = GAME_CONFIG.SHAKE_INTENSITY;
         // ECS particles are extremely fast, we can safely spawn more without FPS drop
-        for (let i = 0; i < 4; i++) {
-            createParticle(x, y, colorId);
+        for (let i = 0; i < 8; i++) {
+            const type = Math.random() > 0.8 ? 1 : 0;
+            createParticle(x, y, colorId, type, 0.8 + Math.random() * 0.5);
+        }
+    }
+
+    createDeathEffect(x: number, y: number) {
+        // Screen shake
+        this.shakeAmount = 12;
+
+        // Shockwave (uses pool, very cheap)
+        this.renderer.triggerShockwave(x, y);
+
+        // Reduced particle burst: 10 instead of 45
+        for (let i = 0; i < 10; i++) {
+            const type = Math.random() > 0.6 ? 1 : 0;
+            const colorIdx = Math.floor(Math.random() * 5);
+            createParticle(x, y, colorIdx, type, 1.0 + Math.random(), 1.0 + Math.random());
         }
     }
 

@@ -36,12 +36,22 @@ io.on("connection", (socket) => {
             console.log("Entering TESTING MODE...");
             socket.emit("tiktok-status", { connected: true, roomId: "TEST_ROOM" });
 
+            // Spawn initial bots immediately
+            for (let i = 0; i < 10; i++) {
+                const dummyId = `bot_${i}`;
+                io.emit("tiktok-member", {
+                    uniqueId: dummyId,
+                    nickname: `Bot ${dummyId}`,
+                    profilePictureUrl: `https://api.dicebear.com/7.x/pixel-art/svg?seed=${dummyId}`,
+                });
+            }
+
             const testInterval = setInterval(() => {
                 const dummyId = `bot_${Math.floor(Math.random() * 50)}`;
                 const isGift = Math.random() > 0.7;
 
                 if (isGift) {
-                    const diamonds = Math.floor(Math.random() * 5) + 1;
+                    const diamonds = Math.floor(Math.random() * 20) + 1;
                     io.emit("tiktok-gift", {
                         uniqueId: dummyId,
                         giftName: "Rose",
@@ -52,22 +62,22 @@ io.on("connection", (socket) => {
                 } else {
                     io.emit("tiktok-chat", {
                         uniqueId: dummyId,
-                        comment: "CYBERPUNK BATTLE!",
+                        comment: "BOOM! BATTLE!",
                         nickname: `Bot ${dummyId}`,
                         profilePictureUrl: `https://api.dicebear.com/7.x/pixel-art/svg?seed=${dummyId}`,
                     });
                 }
 
-                // Simulate member join periodically
-                if (Math.random() > 0.8) {
-                    const newBotId = `bot_${Math.floor(Math.random() * 50 + 50)}`;
+                // Simulate member join periodically (keep the room full)
+                if (Math.random() > 0.5) {
+                    const newBotId = `bot_${Math.floor(Math.random() * 100)}`;
                     io.emit("tiktok-member", {
                         uniqueId: newBotId,
                         nickname: `Bot ${newBotId}`,
                         profilePictureUrl: `https://api.dicebear.com/7.x/pixel-art/svg?seed=${newBotId}`,
                     });
                 }
-            }, 600); // More frequent updates
+            }, 400); // Faster updates for testing
 
             socket.on("disconnect", () => {
                 clearInterval(testInterval);
